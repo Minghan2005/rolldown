@@ -10,18 +10,6 @@ use rolldown_utils::IndexBitSet;
 use rolldown_utils::indexmap::{FxIndexMap, FxIndexSet};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// The interop ESM wrapper a wrapped (`WrapKind::Esm`) module exposes: the `init_*()` binding the
-/// finalizer emits its call sites against, plus whether calling it is a no-op.
-///
-/// Extracted so wrapper declaration emission and `init_*()` call sites read the same view of
-/// [`LinkingMetadata`] instead of reaching into the raw fields independently. This keeps a single
-/// place for later strict-execution-order wrapper paths to extend.
-#[derive(Clone, Copy, Debug)]
-pub struct EsmInitTarget {
-  pub(crate) wrapper_ref: SymbolRef,
-  pub(crate) init_is_noop: bool,
-}
-
 /// Module metadata about linking
 #[derive(Debug, Default)]
 #[expect(clippy::struct_excessive_bools)]
@@ -51,8 +39,16 @@ pub struct LinkingMetadata {
   /// `wrapper_ref` is the `require_cjs` identifier in above example.
   pub wrapper_ref: Option<SymbolRef>,
   pub wrapper_stmt_info: Option<StmtInfoIdx>,
-  /// The module representation decided during linking.
+  /// The wrap kind decided from module semantics before any generate-stage order wrapping.
+  original_wrap_kind: WrapKind,
+  /// The `wrap_kind` used for linking and code generation.
+  /// Intent to make those two fields private, so that we could ensure they are mutated in a more
+  /// safe way.
   wrap_kind: WrapKind,
+  /// Order wrapping may need an ESM wrapper binding that is callable before its declaration in
+  /// cross-chunk cycles. Interop ESM wrappers keep the historical `var init = __esm(...)` shape so
+  /// strictExecutionOrder=false output stays unchanged.
+  pub hoist_esm_wrapper: bool,
   // Store the export info for each module, including export named declaration and export star declaration.
   pub resolved_exports: FxHashMap<CompactStr, ResolvedExport>,
   /// Store the names of exclude ambiguous resolved exports.
@@ -124,11 +120,11 @@ pub struct LinkingMetadata {
   /// now-unused wrapper). Computed by [`crate::stages::generate_stage`]'s
   /// `compute_wrapped_esm_init_metadata`.
   pub init_is_noop: bool,
-  /// For each non-included top-level re-export statement (`export * from`, `export {x} from`,
-  /// `export * as ns from`) of an included `WrapKind::Esm` module: the ordered wrapped-ESM
-  /// modules whose `init_*()` calls must be emitted in its place to preserve execution order.
-  /// Computed by [`crate::stages::generate_stage`]'s `compute_wrapped_esm_init_metadata`;
-  /// consumed by the module finalizer.
+  /// For each non-included top-level import/re-export statement of an included `WrapKind::Esm`
+  /// module: the ordered wrapped-ESM modules whose `init_*()` calls must be emitted in its place
+  /// to preserve execution order. Non-order wrappers keep the legacy re-export-only collection.
+  /// Computed by [`crate::stages::generate_stage`]'s `compute_wrapped_esm_init_metadata`; consumed
+  /// by the module finalizer.
   pub transitive_esm_init_targets: FxHashMap<StmtInfoIdx, Vec<ModuleIdx>>,
 }
 
@@ -154,20 +150,20 @@ impl LinkingMetadata {
   }
 
   #[inline]
-  pub fn set_wrap_kind(&mut self, wrap_kind: WrapKind) {
+  pub fn original_wrap_kind(&self) -> WrapKind {
+    self.original_wrap_kind
+  }
+
+  #[inline]
+  pub fn override_wrap_kind(&mut self, wrap_kind: WrapKind) {
     self.wrap_kind = wrap_kind;
   }
 
-  /// The wrapped-ESM init target of a module, derived from its linking metadata alone: a
-  /// `WrapKind::Esm` module with an allocated wrapper symbol exposes an `init_*()` the finalizer
-  /// emits; anything else has none.
-  pub fn esm_init_target(&self) -> Option<EsmInitTarget> {
-    if !matches!(self.wrap_kind(), WrapKind::Esm) {
-      return None;
-    }
-    self
-      .wrapper_ref
-      .map(|wrapper_ref| EsmInitTarget { wrapper_ref, init_is_noop: self.init_is_noop })
+  /// Synchronize the `wrap_kind` with the original wrap kind.
+  #[inline]
+  pub fn sync_wrap_kind(&mut self, wrap_kind: WrapKind) {
+    self.original_wrap_kind = wrap_kind;
+    self.wrap_kind = wrap_kind;
   }
 
   pub fn referenced_canonical_exports_symbols<'b, 'a: 'b>(
