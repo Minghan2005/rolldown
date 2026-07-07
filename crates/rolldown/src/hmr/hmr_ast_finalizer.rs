@@ -28,21 +28,9 @@ pub struct HmrAstFinalizer<'me, 'ast> {
   pub ast_factory: AstFactory<'ast>,
   pub modules: &'me IndexModules,
   pub module: &'me NormalModule,
-  pub affected_module_idx_to_init_fn_name: &'me FxHashMap<ModuleIdx, String>,
+  /// The modules this payload carries
+  pub carried_module_idxs: &'me FxIndexSet<ModuleIdx>,
   pub use_pife_for_module_wrappers: bool,
-
-  /// Whether the runtime should short-circuit re-execution of the wrapped module body
-  /// when its stable id is already registered.
-  ///
-  /// `true` for lazy-compilation chunks: when a module appears in two lazy bundles served
-  /// concurrently, we want only the first one to actually execute the body.
-  ///
-  /// `false` for HMR patches: the patch's whole point is to re-execute the body and
-  /// replace the registered exports, so deduping would silently drop the update.
-  ///
-  /// Note: This works only as a **workaround**. In the future, HMR runtime should
-  /// provide a runtime API to trigger module disposal and re-execution. @hana
-  pub dedup_module_initializer: bool,
 
   // Each module has a unique index, which is used to generate something that needs to be unique.
   pub unique_index: usize,
@@ -802,29 +790,21 @@ impl<'ast> HmrAstFinalizer<'_, 'ast> {
       );
     }
 
-    if let Some(init_fn_name) = self.affected_module_idx_to_init_fn_name.get(&importee_idx) {
-      // If the importee is in the propagation chain, we need to call the init function to re-execute the module.
-      // Turn `import('./foo.js')` into `(init_foo(), Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js')))`
-
-      // init_foo()
-      let init_fn_call = ast::CallExpression::boxed(
-        SPAN,
-        self.ast_factory.make_id_ref_expr(SPAN, init_fn_name),
-        NONE,
-        oxc::allocator::Vec::new_in(&self.ast_factory),
-        false,
-        &self.ast_factory,
-      );
+    if self.carried_module_idxs.contains(&importee_idx) {
+      // If the importee rides this payload, init it through the registry gate before
+      // loading its exports.
+      // Turn `import('./foo.js')` into
+      // `(__rolldown_runtime__.initModule('./foo.js'), Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js')))`
+      let init_call = self.make_init_module_call(&self.modules[importee_idx]);
 
       // Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js'))
       let promise_resolve_then_load_exports =
         self.ast_factory.make_promise_resolve_then(load_exports_call_expr);
 
-      // (init_foo(), Promise.resolve().then(() => __rolldown_runtime__.loadExports('./foo.js')))
       let ret_expr = ast::Expression::SequenceExpression(ast::SequenceExpression::boxed(
         SPAN,
         oxc::allocator::Vec::from_array_in(
-          [ast::Expression::CallExpression(init_fn_call), promise_resolve_then_load_exports],
+          [init_call, promise_resolve_then_load_exports],
           &self.ast_factory,
         ),
         &self.ast_factory,
@@ -942,25 +922,28 @@ impl<'ast> HmrAstFinalizer<'_, 'ast> {
       )
     };
 
-    if let Some(init_fn_name) = self.affected_module_idx_to_init_fn_name.get(&importee_idx) {
-      // If the importee is in the current patch, call init before loading exports
-      // Turn `require('./foo.js')` into `(init_foo(), __rolldown_runtime__.loadExports('./foo.js'))`
-      *it = self.ast_factory.make_seq_in_parens(
-        ast::Expression::new_call_expression(
-          SPAN,
-          self.ast_factory.make_id_ref_expr(SPAN, init_fn_name),
-          NONE,
-          oxc::allocator::Vec::new_in(&self.ast_factory),
-          false,
-          &self.ast_factory,
-        ),
-        load_exports_expr,
-      );
-    } else {
-      // Importee is not in current patch (already executed by client), just load its exports
-      // Turn `require('./foo.js')` into `__rolldown_runtime__.loadExports('./foo.js')`
-      *it = load_exports_expr;
-    }
+    // `require` is a static record and an execution point: init through the one
+    // registry gate — a resident module short-circuits, a carried factory runs.
+    // Turn `require('./foo.js')` into
+    // `(__rolldown_runtime__.initModule('./foo.js'), __rolldown_runtime__.loadExports('./foo.js'))`
+    *it = self.ast_factory.make_seq_in_parens(
+      self.make_init_module_call(&self.modules[importee_idx]),
+      load_exports_expr,
+    );
+  }
+
+  /// `__rolldown_runtime__.initModule("<stable id>")`
+  pub fn make_init_module_call(&self, module: &Module) -> ast::Expression<'ast> {
+    self.ast_factory.make_call_with_arg(
+      self.ast_factory.make_member_access_expr("__rolldown_runtime__", "initModule"),
+      ast::Expression::new_string_literal(
+        SPAN,
+        Str::from_str_in(module.stable_id(), &self.ast_factory),
+        None,
+        &self.ast_factory,
+      ),
+      false,
+    )
   }
 }
 

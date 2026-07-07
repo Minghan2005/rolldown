@@ -3,7 +3,7 @@ use std::{
   sync::{Arc, atomic::AtomicU32},
 };
 
-use rolldown_common::{ClientHmrInput, ScanMode};
+use rolldown_common::{ClientHmrInput, HmrUpdate, ScanMode};
 use rolldown_utils::indexmap::FxIndexMap;
 use tokio::sync::Mutex;
 
@@ -12,7 +12,10 @@ use rolldown::Bundler;
 use crate::{
   BundleOutput,
   dev_context::SharedDevContext,
-  types::{coordinator_msg::CoordinatorMsg, error_stage::ErrorStage, task_input::TaskInput},
+  types::{
+    coordinator_msg::CoordinatorMsg, error_stage::ErrorStage, pending_payload::PendingPayload,
+    task_input::TaskInput,
+  },
 };
 
 pub struct BundlingTask {
@@ -159,29 +162,68 @@ impl BundlingTask {
       .map(|(p, event)| (p.to_string_lossy().to_string(), *event))
       .collect::<FxIndexMap<_, _>>();
 
-    let client_sessions = self.dev_context.clients.lock().await;
+    // Read-only per-client inputs for this push. No seq here: it is assigned after compute,
+    // only to the patches we actually deliver (see below).
+    let mut client_sessions = self.dev_context.clients.lock().await;
     let client_inputs: Vec<ClientHmrInput> = client_sessions
       .iter()
       .map(|(client_key, client)| ClientHmrInput {
         client_id: client_key,
-        executed_modules: &client.executed_modules,
+        shipped: &client.shipped,
       })
       .collect();
 
     // Compute HMR updates for all clients in one call
-    let hmr_result = bundler
+    let mut stamp_table = self.dev_context.stamp_table.lock().await;
+    let mut hmr_result = bundler
       .compute_hmr_update_for_file_changes(
         &changed_files,
         &client_inputs,
+        &mut stamp_table,
         Arc::clone(&self.next_hmr_patch_id),
       )
       .await;
+    drop(stamp_table);
+    drop(client_inputs);
 
-    // Check if any update is a full reload (only if successful)
+    // `seq` is incremented only when the client actually receives an update — i.e. an
+    // `HmrUpdate::Patch`. A `HmrUpdate::Noop` sends nothing, and a `HmrUpdate::FullReload`
+    // is sent without a seq, so neither advances the counter. The client enforces a strict
+    // `seq === lastSeq + 1`, so consuming a seq without delivering an envelope would leave a
+    // gap and trigger a spurious full reload.
+    if let Ok(client_updates) = &mut hmr_result {
+      for update in client_updates.iter_mut() {
+        if let HmrUpdate::Patch(patch) = &mut update.update {
+          if let Some(session) = client_sessions.get_mut(&update.client_id) {
+            session.next_seq += 1;
+            patch.seq = session.next_seq;
+          }
+        }
+      }
+    }
+    drop(client_sessions);
+
+    // Check if any update is a full reload (only if successful), and record each
+    // rendered patch as pending: the delivery notification max-merges its stamps
+    // into `shipped[C]` when the serving middleware sees the response for
+    // `patch.filename` complete.
     if let Ok(client_updates) = &hmr_result {
       for update in client_updates {
-        if update.update.is_full_reload() {
-          *has_full_reload_update = true;
+        match &update.update {
+          HmrUpdate::FullReload { .. } => *has_full_reload_update = true,
+          HmrUpdate::Patch(patch) => {
+            self
+              .dev_context
+              .insert_pending_payload(
+                patch.filename.clone(),
+                PendingPayload {
+                  client_id: update.client_id.clone(),
+                  modules: patch.carried.clone(),
+                },
+              )
+              .await;
+          }
+          HmrUpdate::Noop => {}
         }
       }
     }

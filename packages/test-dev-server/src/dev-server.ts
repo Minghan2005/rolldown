@@ -200,20 +200,10 @@ class DevServer {
         env.disconnectClient(client.id);
         this.#logger.info(`Client ${client.id} disconnected`);
       });
-      ws.on('message', async (rawData) => {
-        const clientMessage = decodeClientMessage(rawData);
-        switch (clientMessage.type) {
-          case 'hmr:invalidate':
-            await env.invalidate(clientMessage.moduleId, client);
-            break;
-          case 'hmr:module-registered':
-            await env.registerModules(client.id, clientMessage.modules);
-            break;
-          default: {
-            const _never: never = clientMessage;
-            void _never;
-          }
-        }
+      ws.on('message', (rawData) => {
+        // No upstream state exists under the client-side HMR design; inbound messages
+        // are legacy no-ops and are ignored.
+        decodeClientMessage(rawData);
       });
     });
   }

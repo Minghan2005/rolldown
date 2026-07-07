@@ -1,7 +1,5 @@
 import type { RawData } from 'ws';
 
-import type { ClientMessage } from '../types/client-message';
-
 function rawDataToString(data: Buffer | ArrayBuffer | Buffer[]): string {
   if (Buffer.isBuffer(data)) {
     return data.toString('utf8');
@@ -12,16 +10,17 @@ function rawDataToString(data: Buffer | ArrayBuffer | Buffer[]): string {
   return Buffer.from(data).toString('utf8');
 }
 
-export function decodeClientMessage(data: RawData): ClientMessage {
+/**
+ * The redesigned runtime sends no upstream state, so every inbound message is either a
+ * legacy no-op (e.g. `hmr:invalidate` from the standalone hot context — handled fully
+ * client-side under the redesign) or unknown; both are ignored.
+ */
+export function decodeClientMessage(data: RawData): null {
   const stringified = rawDataToString(data);
-  const decoded = JSON.parse(stringified) as ClientMessage;
-  switch (decoded.type) {
-    case 'hmr:invalidate':
-      return { type: 'hmr:invalidate', moduleId: decoded.moduleId };
-    case 'hmr:module-registered':
-      return { type: 'hmr:module-registered', modules: decoded.modules };
-    default:
-      const _never: never = decoded;
-      throw new Error(`Unknown client message: ${stringified}`);
+  try {
+    JSON.parse(stringified);
+  } catch {
+    // not JSON — ignore
   }
+  return null;
 }

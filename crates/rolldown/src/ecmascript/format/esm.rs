@@ -2,7 +2,7 @@ use arcstr::ArcStr;
 use itertools::Itertools;
 use rolldown_common::{
   AddonRenderContext, ExportsKind, ExternalModule, ImportRecordIdx, ImportRecordMeta, ModuleIdx,
-  ModuleTable, Specifier, SymbolRef,
+  ModuleTable, RUNTIME_MODULE_KEY, Specifier, SymbolRef,
 };
 use rolldown_sourcemap::SourceJoiner;
 use rolldown_utils::{concat_string, ecmascript::to_module_import_export_name};
@@ -123,13 +123,40 @@ fn render_chunk_content<'code>(
   module_sources: &'code [RenderedModuleSource],
   source_joiner: &mut SourceJoiner<'code>,
 ) {
+  // Dev mode: every chunk carries a graph-rows prelude for the client-side HMR walk.
+  // It references `__rolldown_runtime__`, so in the chunk that defines the runtime it
+  // must land right after the runtime module; everywhere else it comes first (the
+  // global is guaranteed by the chunk's ESM import of the runtime-carrying chunk).
+  let mut dev_graph_prelude = if ctx.options.is_dev_mode_enabled() {
+    crate::hmr::module_graph_delta::render_register_graph_source(
+      &ctx.link_output.module_table,
+      ctx.chunk.modules.iter().copied(),
+    )
+  } else {
+    None
+  };
+  let is_runtime_module =
+    |idx: ModuleIdx| ctx.link_output.module_table[idx].id().as_str() == RUNTIME_MODULE_KEY;
+  let chunk_carries_runtime =
+    dev_graph_prelude.is_some() && ctx.chunk.modules.iter().copied().any(is_runtime_module);
+  if !chunk_carries_runtime {
+    if let Some(prelude) = dev_graph_prelude.take() {
+      source_joiner.append_source(prelude);
+    }
+  }
+
   // If there is no concatenate_wrapping_modules, just concate all modules by exec order.
   if ctx.chunk.module_groups.is_empty() {
     module_sources.iter().for_each(
-      |RenderedModuleSource { sources: module_render_output, .. }| {
+      |RenderedModuleSource { sources: module_render_output, module_idx, .. }| {
         if let Some(emitted_sources) = module_render_output {
           for source in emitted_sources.as_ref() {
             source_joiner.append_source(source);
+          }
+        }
+        if is_runtime_module(*module_idx) {
+          if let Some(prelude) = dev_graph_prelude.take() {
+            source_joiner.append_source(prelude);
           }
         }
       },
@@ -154,6 +181,11 @@ fn render_chunk_content<'code>(
       if let Some(emitted_sources) = source.sources.as_ref() {
         for source in emitted_sources.as_ref() {
           source_joiner.append_source(source);
+        }
+      }
+      if is_runtime_module(group.entry) {
+        if let Some(prelude) = dev_graph_prelude.take() {
+          source_joiner.append_source(prelude);
         }
       }
       continue;
@@ -237,6 +269,14 @@ fn render_chunk_content<'code>(
     }
     postfix += ");\n";
     source_joiner.append_source(postfix);
+    if group.modules.iter().copied().any(is_runtime_module) {
+      if let Some(prelude) = dev_graph_prelude.take() {
+        source_joiner.append_source(prelude);
+      }
+    }
+  }
+  if let Some(prelude) = dev_graph_prelude.take() {
+    source_joiner.append_source(prelude);
   }
 }
 

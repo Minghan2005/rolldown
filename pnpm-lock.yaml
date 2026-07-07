@@ -746,61 +746,61 @@ importers:
         specifier: ^1.60.0
         version: 1.61.1
 
-  packages/test-dev-server/tests/fixtures/client-module-execution-status:
-    devDependencies:
-      '@rolldown/test-dev-server':
-        specifier: workspace:*
-        version: link:../../..
-
   packages/test-dev-server/tests/fixtures/defer-sync-scan-data:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
         version: link:../../..
 
-  packages/test-dev-server/tests/fixtures/edit:
+  packages/test-dev-server/tests/playground/hmr-accept-syntax:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
         version: link:../../..
 
-  packages/test-dev-server/tests/fixtures/edit-rebuild:
+  packages/test-dev-server/tests/playground/hmr-client-invalidate:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
         version: link:../../..
 
-  packages/test-dev-server/tests/fixtures/edit-reload:
+  packages/test-dev-server/tests/playground/hmr-dynamic-import-accept-dep:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
         version: link:../../..
 
-  packages/test-dev-server/tests/fixtures/invalidation:
-    devDependencies:
-      '@rolldown/test-dev-server':
-        specifier: workspace:*
-        version: link:../../..
-
-  packages/test-dev-server/tests/fixtures/load-dependencies:
-    devDependencies:
-      '@rolldown/test-dev-server':
-        specifier: workspace:*
-        version: link:../../..
-
-  packages/test-dev-server/tests/fixtures/multiple-edits:
-    devDependencies:
-      '@rolldown/test-dev-server':
-        specifier: workspace:*
-        version: link:../../..
-
-  packages/test-dev-server/tests/fixtures/transform-dependencies:
+  packages/test-dev-server/tests/playground/hmr-dynamic-import-self-accept:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
         version: link:../../..
 
   packages/test-dev-server/tests/playground/hmr-full-bundle-mode:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/hmr-patch-dedup:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/hmr-reconnect-ledger:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/hmr-runtime-acceptance:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/hmr-whole-chain-dispose:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
@@ -813,6 +813,12 @@ importers:
         version: link:../../..
 
   packages/test-dev-server/tests/playground/lazy-compilation:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/lazy-overlap-dedup:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
