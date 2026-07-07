@@ -254,8 +254,6 @@ impl GenerateStage<'_> {
 
     chunk_graph.rebuild_sorted_chunk_idx_vec();
 
-    self.find_entry_level_external_module(&mut chunk_graph);
-
     Ok(chunk_graph)
   }
 
@@ -596,7 +594,11 @@ impl GenerateStage<'_> {
   }
 
   /// Find all entry level external modules, and re propagate `has_dynamic_exports` for affected modules.
-  fn find_entry_level_external_module(&mut self, chunk_graph: &mut ChunkGraph) {
+  pub(super) fn find_entry_level_external_module(&mut self, chunk_graph: &mut ChunkGraph) {
+    for chunk in chunk_graph.chunk_table.iter_mut() {
+      chunk.entry_level_external_module_idx.clear();
+    }
+
     let module_to_entry_level_external_rec_list_maps = chunk_graph
       .chunk_table
       .par_iter_enumerated()
