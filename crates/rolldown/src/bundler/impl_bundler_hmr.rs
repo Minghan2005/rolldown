@@ -5,13 +5,11 @@ use crate::hmr::hmr_stage::{HmrStage, HmrStageInput};
 #[cfg(feature = "experimental")]
 use rolldown_common::WatcherChangeKind;
 #[cfg(feature = "experimental")]
-use rolldown_common::{ClientHmrInput, ClientHmrUpdate, HmrLazyChunkOutput, HmrStampTable};
+use rolldown_common::{ClientHmrInput, ClientHmrUpdate, HmrLazyChunkOutput};
 #[cfg(feature = "experimental")]
 use rolldown_error::BuildResult;
 #[cfg(feature = "experimental")]
 use rolldown_utils::indexmap::FxIndexMap;
-#[cfg(feature = "experimental")]
-use rustc_hash::FxHashMap;
 #[cfg(feature = "experimental")]
 use std::sync::{Arc, atomic::AtomicU32};
 
@@ -22,7 +20,6 @@ impl Bundler {
     &mut self,
     changed_file_paths: &FxIndexMap<String, WatcherChangeKind>,
     clients: &[ClientHmrInput<'_>],
-    stamp_table: &mut HmrStampTable,
     next_hmr_patch_id: Arc<AtomicU32>,
   ) -> BuildResult<Vec<ClientHmrUpdate>> {
     // HMR partial scans use the shared rayon pool without passing through
@@ -42,11 +39,10 @@ impl Bundler {
       cache: &mut self.cache,
       next_hmr_patch_id,
     });
-    hmr_stage.compute_hmr_update_for_file_changes(changed_file_paths, clients, stamp_table).await
+    hmr_stage.compute_hmr_update_for_file_changes(changed_file_paths, clients).await
   }
 
-  /// Compile a lazy entry module and return compiled code plus the pending-payload
-  /// entry the delivery-time ledger write consumes.
+  /// Compile a lazy entry module and return the compiled chunk.
   ///
   /// This is called when a dynamically imported module is first requested at runtime.
   /// The module was previously stubbed with a proxy, and now we need to compile the
@@ -55,8 +51,6 @@ impl Bundler {
     &mut self,
     module_id: String,
     client_id: &str,
-    shipped: &FxHashMap<String, u32>,
-    stamp_table: &HmrStampTable,
     next_hmr_patch_id: Arc<AtomicU32>,
   ) -> BuildResult<HmrLazyChunkOutput> {
     // HMR partial scans use the shared rayon pool without passing through
@@ -74,6 +68,6 @@ impl Bundler {
       cache: &mut self.cache,
       next_hmr_patch_id,
     });
-    hmr_stage.compile_lazy_entry(&module_id, client_id, shipped, stamp_table).await
+    hmr_stage.compile_lazy_entry(&module_id, client_id).await
   }
 }

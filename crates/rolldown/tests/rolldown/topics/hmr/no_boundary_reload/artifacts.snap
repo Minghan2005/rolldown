@@ -1,6 +1,5 @@
 ---
 source: crates/rolldown_testing/src/integration_test.rs
-assertion_line: 631
 ---
 # Assets
 
@@ -23,26 +22,28 @@ console.log(1);
 
 # HMR Step 0
 
-## Code
-
-```js
-__rolldown_runtime__.registerGraph({ids:["main.js"],localCount:1,edges:[[]],dynamicEdges:[[]]});
-//#region main.js
-__rolldown_runtime__.registerFactory("main.js", "esm", (function(__rolldown_module_id__) {
-	try {
-		__rolldown_runtime__.registerModule(__rolldown_module_id__, {});
-		const hot_main = __rolldown_runtime__.createModuleHotContext(__rolldown_module_id__);
-		console.log(2);
-	} finally {}
-}));
-
-//#endregion
-```
-
 ## Meta
 
-- update type: patch
+- update type: full-reload
+- reason: no hmr boundary found for module `main.js`
 
-### Changed Ids
+## Build Output
 
-- main.js
+### Assets
+
+#### main.js
+
+```js
+// HIDDEN [\0rolldown/runtime.js]
+__rolldown_runtime__.registerGraph({
+	ids: ["main.js"],
+	localCount: 1,
+	edges: [[]],
+	dynamicEdges: [[]]
+});
+__rolldown_runtime__.createModuleHotContext("main.js");
+__rolldown_runtime__.registerModule("main.js", {});
+console.log(2);
+//#endregion
+
+```

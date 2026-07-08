@@ -12,10 +12,7 @@ use rolldown::Bundler;
 use crate::{
   BundleOutput,
   dev_context::SharedDevContext,
-  types::{
-    coordinator_msg::CoordinatorMsg, error_stage::ErrorStage, pending_payload::PendingPayload,
-    task_input::TaskInput,
-  },
+  types::{coordinator_msg::CoordinatorMsg, error_stage::ErrorStage, task_input::TaskInput},
 };
 
 pub struct BundlingTask {
@@ -165,25 +162,17 @@ impl BundlingTask {
     // Read-only per-client inputs for this push. No seq here: it is assigned after compute,
     // only to the patches we actually deliver (see below).
     let mut client_sessions = self.dev_context.clients.lock().await;
-    let client_inputs: Vec<ClientHmrInput> = client_sessions
-      .iter()
-      .map(|(client_key, client)| ClientHmrInput {
-        client_id: client_key,
-        shipped: &client.shipped,
-      })
-      .collect();
+    let client_inputs: Vec<ClientHmrInput> =
+      client_sessions.keys().map(|client_key| ClientHmrInput { client_id: client_key }).collect();
 
     // Compute HMR updates for all clients in one call
-    let mut stamp_table = self.dev_context.stamp_table.lock().await;
     let mut hmr_result = bundler
       .compute_hmr_update_for_file_changes(
         &changed_files,
         &client_inputs,
-        &mut stamp_table,
         Arc::clone(&self.next_hmr_patch_id),
       )
       .await;
-    drop(stamp_table);
     drop(client_inputs);
 
     // `seq` is incremented only when the client actually receives an update — i.e. an
@@ -203,27 +192,11 @@ impl BundlingTask {
     }
     drop(client_sessions);
 
-    // Check if any update is a full reload (only if successful), and record each
-    // rendered patch as pending: the delivery notification max-merges its stamps
-    // into `shipped[C]` when the serving middleware sees the response for
-    // `patch.filename` complete.
+    // Check if any update is a full reload (only if successful)
     if let Ok(client_updates) = &hmr_result {
       for update in client_updates {
-        match &update.update {
-          HmrUpdate::FullReload { .. } => *has_full_reload_update = true,
-          HmrUpdate::Patch(patch) => {
-            self
-              .dev_context
-              .insert_pending_payload(
-                patch.filename.clone(),
-                PendingPayload {
-                  client_id: update.client_id.clone(),
-                  modules: patch.carried.clone(),
-                },
-              )
-              .await;
-          }
-          HmrUpdate::Noop => {}
+        if update.update.is_full_reload() {
+          *has_full_reload_update = true;
         }
       }
     }

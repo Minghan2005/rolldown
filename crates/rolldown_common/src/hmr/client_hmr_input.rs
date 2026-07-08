@@ -1,12 +1,7 @@
-use rustc_hash::FxHashMap;
-
-/// Per-client input for selecting the factories an HMR push ships. The server never
-/// sees execution state — the selection reads only `shipped[C]`, the record of the
-/// server's own deliveries (module stable id → rebuild stamp of the copy this client
-/// holds).
+/// Per-client input for an HMR push. The server never sees execution state; every
+/// client currently receives the full affected factory set, and the per-client
+/// delivery ledger (`shipped[C]`) that narrows it lands in a follow-up.
 #[derive(Debug)]
 pub struct ClientHmrInput<'a> {
   pub client_id: &'a str,
-  /// The delivery ledger `shipped[C]`: module stable id → rebuild stamp.
-  pub shipped: &'a FxHashMap<String, u32>,
 }

@@ -9,8 +9,8 @@ use std::{
 use arcstr::ArcStr;
 use oxc_traverse::traverse_mut;
 use rolldown_common::{
-  ClientHmrInput, ClientHmrUpdate, HmrLazyChunkOutput, HmrPatch, HmrStampTable, HmrUpdate,
-  ImportKind, Module, ModuleIdx, ModuleTable, ScanMode, WatcherChangeKind,
+  ClientHmrInput, ClientHmrUpdate, HmrLazyChunkOutput, HmrPatch, HmrUpdate, ImportKind, Module,
+  ModuleIdx, ModuleTable, ScanMode, WatcherChangeKind,
 };
 use rolldown_ecmascript::{EcmaAst, EcmaCompiler, PrintCommentsOptions, PrintOptions};
 use rolldown_ecmascript_utils::AstFactory;
@@ -80,7 +80,6 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     &mut self,
     changed_file_paths: &FxIndexMap<String, WatcherChangeKind>,
     clients: &[ClientHmrInput<'_>],
-    stamp_table: &mut HmrStampTable,
   ) -> BuildResult<Vec<ClientHmrUpdate>> {
     tracing::trace!(
       "[HmrStage] starts computing HMR updates\n - changed_file_paths: {:#?}\n - clients: {:#?}",
@@ -199,20 +198,11 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       new_added_modules
     };
 
-    // 2. Stamp the rebuild: `latest[m] = rebuild_seq` for every changed or newly added
-    // module — the versioned ledger's staleness source.
-    let rebuild_seq = stamp_table.begin_rebuild();
-    for module_idx in changed_modules.iter().chain(new_added_modules.iter()) {
-      if let Module::Normal(module) = &self.module_table().modules[*module_idx] {
-        stamp_table.stamp(module.stable_id.as_str(), rebuild_seq);
-      }
-    }
-
-    // 3. Collect the factories to ship. The client's walk may remove modules from its cache and re-run
+    // 2. Collect the factories to ship. The client's walk may remove modules from its cache and re-run
     // anything up the changed ids' importer chains, and a re-run without a resident
     // factory forces a reload — so the server must ship a SUPERSET of any client's
     // possible update set, over-approximated on static truth (it never sees runtime
-    // acceptance). The ledger below subtracts what each tab already holds.
+    // acceptance).
     let changed_ids = changed_modules
       .iter()
       .filter_map(|module_idx| {
@@ -236,38 +226,11 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
         affected.extend(new_added_modules.iter().copied());
         affected.retain(|idx| self.module_table().modules[*idx].is_normal());
 
-        // 4. Per client: `need[C] = (affected ∖ shipped[C]) ∪ whole-ledger stale sweep`.
-        // The sweep covers the ENTIRE ledger, not just `affected` — a parked factory can
-        // go stale behind a skipped patch in either graph direction.
+        // 3. Every client receives the full affected set. The per-client delivery
+        // ledger (`shipped[C]`) that narrows this to what each tab lacks lands in a
+        // follow-up; re-shipped factories are idempotent, so this only costs bytes.
         for client in clients {
-          let mut carried = FxIndexSet::default();
-          for module_idx in &affected {
-            let stable_id = self.module_table().modules[*module_idx].stable_id().as_str();
-            match client.shipped.get(stable_id) {
-              None => {
-                carried.insert(*module_idx);
-              }
-              Some(stamp) => {
-                if stamp_table.is_stale(stable_id, *stamp) {
-                  carried.insert(*module_idx);
-                }
-              }
-            }
-          }
-          for (stable_id, stamp) in client.shipped {
-            if stamp_table.is_stale(stable_id, *stamp) {
-              if let Some(module_idx) =
-                self.cache.module_idx_by_stable_id.get(stable_id.as_str()).copied()
-              {
-                if self.module_table().modules[module_idx].is_normal() {
-                  carried.insert(module_idx);
-                }
-              }
-            }
-          }
-
-          let update =
-            self.render_hmr_patch(carried, changed_ids.clone(), stamp_table).await?;
+          let update = self.render_hmr_patch(affected.clone(), changed_ids.clone()).await?;
           client_updates.push(ClientHmrUpdate { client_id: client.client_id.to_string(), update });
         }
       }
@@ -310,18 +273,15 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     UpdateSupersetOutcome::Superset(affected)
   }
 
-  /// Compile a lazy entry module and return compiled code plus the pending-payload
-  /// entry (`carried`) the delivery-time ledger write consumes.
+  /// Compile a lazy entry module and return the compiled chunk.
   ///
-  /// Factory selection filters the reachable set by the ledger comparison — absent from
-  /// `shipped[C]` or stale stamp — never by execution state. The ledger itself is
-  /// written only when the serving middleware observes the response complete.
+  /// The chunk carries every reachable sync dependency's factory — never filtered by
+  /// execution state. The per-client delivery ledger that narrows this to what each
+  /// tab lacks lands in a follow-up; re-shipped factories are idempotent.
   pub async fn compile_lazy_entry(
     &mut self,
     module_id: &str,
     _client_id: &str,
-    shipped: &FxHashMap<String, u32>,
-    stamp_table: &HmrStampTable,
   ) -> BuildResult<HmrLazyChunkOutput> {
     tracing::debug!(
       target: "hmr",
@@ -392,17 +352,10 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
     let options = Arc::clone(&self.options);
     self.cache.update_defer_sync_data(&options).await?;
 
-    // Collect all sync dependencies, stopping at modules whose current copy this client
-    // already holds per the ledger. Overlapping concurrent lazy compiles both see an
-    // unmarked ledger and re-ship shared factories — duplicate idempotent bytes, never
-    // a missing factory.
+    // Collect all reachable sync dependencies. Overlapping lazy compiles re-ship
+    // shared factories — duplicate idempotent bytes, never a missing factory.
     let mut modules_to_be_updated = FxIndexSet::default();
-    self.collect_sync_dependencies_for_client(
-      entry_module_idx,
-      &mut modules_to_be_updated,
-      shipped,
-      stamp_table,
-    );
+    self.collect_sync_dependencies_for_client(entry_module_idx, &mut modules_to_be_updated);
 
     // Remove external modules - no way to "compile" them
     modules_to_be_updated.retain(|idx| self.module_table().modules[*idx].is_normal());
@@ -547,22 +500,13 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       .await?;
     }
 
-    let carried = modules_to_be_updated
-      .iter()
-      .map(|module_idx| {
-        let stable_id = self.module_table().modules[*module_idx].stable_id().as_str();
-        (stable_id.to_string(), stamp_table.render_time_stamp(stable_id))
-      })
-      .collect();
-
-    Ok(HmrLazyChunkOutput { code, filename, carried })
+    Ok(HmrLazyChunkOutput { code, filename })
   }
 
   async fn render_hmr_patch(
     &self,
     mut carried_modules: FxIndexSet<ModuleIdx>,
     changed_ids: Vec<String>,
-    stamp_table: &HmrStampTable,
   ) -> BuildResult<HmrUpdate> {
     // Note: the carried set might include external modules. There's no way to "update" them, so we need to remove them.
     carried_modules.retain(|idx| self.module_table().modules[*idx].is_normal());
@@ -702,14 +646,6 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       None
     };
 
-    let carried = carried_modules
-      .iter()
-      .map(|module_idx| {
-        let stable_id = self.module_table().modules[*module_idx].stable_id().as_str();
-        (stable_id.to_string(), stamp_table.render_time_stamp(stable_id))
-      })
-      .collect();
-
     Ok(HmrUpdate::Patch(HmrPatch {
       code,
       filename,
@@ -719,7 +655,6 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
       // The envelope seq is a delivery-layer concern; the dev engine stamps it onto the
       // patches it actually sends (see `bundling_task`), so this is only a placeholder.
       seq: 0,
-      carried,
     }))
   }
 
@@ -841,8 +776,6 @@ impl<Fs: FileSystem + Clone + 'static> HmrStage<'_, Fs> {
     &self,
     proxy_entry_idx: ModuleIdx,
     result: &mut FxIndexSet<ModuleIdx>,
-    shipped: &FxHashMap<String, u32>,
-    stamp_table: &HmrStampTable,
   ) {
     let modules = &self.module_table().modules;
     let mut stack = vec![proxy_entry_idx];
@@ -864,14 +797,6 @@ impl<Fs: FileSystem + Clone + 'static> HmrStage<'_, Fs> {
           || (module_idx == proxy_entry_idx && rec.kind == ImportKind::DynamicImport);
 
         if should_follow && let Some(dep_idx) = rec.resolved_module {
-          if let Module::Normal(normal_dep) = &modules[dep_idx] {
-            // Skip deps whose current copy this client already holds per the ledger.
-            let stable_id = normal_dep.stable_id.as_str();
-            if shipped.get(stable_id).is_some_and(|stamp| !stamp_table.is_stale(stable_id, *stamp))
-            {
-              continue;
-            }
-          }
           stack.push(dep_idx);
         }
       }
