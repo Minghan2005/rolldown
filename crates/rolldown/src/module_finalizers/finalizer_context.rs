@@ -2,7 +2,6 @@ use rolldown_common::{
   AstScopes, Chunk, ChunkIdx, ConstExportMeta, ImportRecordIdx, IndexModules, ModuleIdx,
   ModuleType, NormalModule, PathsOutputOption, RenderedConcatenatedModuleParts,
   RetainedExportSymbols, RuntimeModuleBrief, SharedFileEmitter, StmtInfos, SymbolRef, SymbolRefDb,
-  WrapKind,
 };
 
 pub type FinalizerMutableFields = (
@@ -20,8 +19,8 @@ use crate::{
   SharedOptions,
   chunk_graph::ChunkGraph,
   module_finalizers::{ScopeHoistingFinalizer, TraverseState},
-  stages::link_stage::SafelyMergeCjsNsInfo,
-  types::linking_metadata::{EsmInitTarget, LinkingMetadata, LinkingMetadataVec},
+  stages::{generate_stage::order_wrap_state::OrderWrapState, link_stage::SafelyMergeCjsNsInfo},
+  types::linking_metadata::{LinkingMetadata, LinkingMetadataVec},
 };
 
 pub struct ScopeHoistingFinalizerContext<'me> {
@@ -35,6 +34,7 @@ pub struct ScopeHoistingFinalizerContext<'me> {
   pub modules: &'me IndexModules,
   pub linking_info: &'me LinkingMetadata,
   pub linking_infos: &'me LinkingMetadataVec,
+  pub order_wrap_state: &'me OrderWrapState,
   pub symbol_db: &'me SymbolRefDb,
   pub runtime: &'me RuntimeModuleBrief,
   pub chunk_graph: &'me ChunkGraph,
@@ -50,45 +50,14 @@ pub struct ScopeHoistingFinalizerContext<'me> {
   pub has_enum_inlining: bool,
 }
 
-/// How the finalizer must wrap the current module, resolved once from its linking metadata.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum ModuleWrapperMode {
-  /// No wrapper declaration is emitted for this module.
-  None,
-  /// CJS interop wrapper (`__commonJS`); carries the wrapper symbol.
-  InteropCjs(SymbolRef),
-  /// ESM interop wrapper (`__esm`); carries the init target the call sites reference.
-  InteropEsm(EsmInitTarget),
-}
-
 impl<'me> ScopeHoistingFinalizerContext<'me> {
-  /// Classify how this module's wrapper is emitted. Replaces the finalizer's inline
-  /// `wrap_kind() + wrapper-statement-included` checks with a single view so all wrapper and
-  /// `init_*()` decisions read the same source of truth.
-  pub(super) fn wrapper_mode(&self) -> ModuleWrapperMode {
-    let legacy_wrapper_is_included = self
-      .linking_info
-      .wrapper_stmt_info
-      .is_some_and(|stmt_idx| self.linking_info.stmt_info_included.has_bit(stmt_idx));
-
-    if matches!(self.linking_info.wrap_kind(), WrapKind::Cjs) && legacy_wrapper_is_included {
-      return ModuleWrapperMode::InteropCjs(
-        self.linking_info.wrapper_ref.expect("included CJS wrapper should have a symbol"),
-      );
-    }
-
-    match self.linking_info.esm_init_target() {
-      Some(target) if legacy_wrapper_is_included => ModuleWrapperMode::InteropEsm(target),
-      _ => ModuleWrapperMode::None,
-    }
-  }
-
   #[tracing::instrument(level = "trace", skip_all)]
   pub fn finalize_normal_module(
     self,
     ast: &'me mut EcmaAst,
     ast_scope: &'me AstScopes,
   ) -> FinalizerMutableFields {
+    debug_assert!(self.order_wrap_state.is_empty());
     ast.program.with_mut(move |fields| {
       let (oxc_program, alloc) = (fields.program, fields.allocator);
 
