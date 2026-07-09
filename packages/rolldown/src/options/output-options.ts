@@ -738,10 +738,10 @@ export interface OutputOptions {
   /**
    * Preserve source module execution order across generated chunks.
    *
-   * When enabled, Rolldown analyzes the finalized chunk graph and wraps only the ESM modules whose eager execution could be reordered by code splitting. Interop wrappers for CommonJS and require-of-ESM modules are unchanged. External modules are not affected.
+   * When enabled, Rolldown wraps ESM modules so their bodies run in source order regardless of chunk placement. Interop wrappers for CommonJS and require-of-ESM modules are unchanged, and external modules are not affected. `experimental.onDemandWrapping` limits the wrapping to modules whose execution the generated chunk graph could actually reorder.
    *
    * > [!WARNING]
-   * > Enabling this option can increase bundle size because wrapped modules need runtime init helpers. The increase depends on how many modules are at risk in the generated chunk graph.
+   * > Enabling this option increases bundle size because wrapped modules need runtime init helpers.
    * @default false
    */
   strictExecutionOrder?: boolean;
