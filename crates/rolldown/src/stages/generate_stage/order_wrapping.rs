@@ -3,9 +3,9 @@ use crate::{
 };
 use itertools::Itertools;
 use rolldown_common::{
-  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ImportKind, ImportRecordIdx, ImportRecordMeta,
-  IndexModules, ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper, StmtInfoIdx, SymbolRef,
-  SymbolRefDb, UsedSymbolRefsBuilder, WrapKind,
+  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ConcatenateWrappedModuleKind, ImportKind, ImportRecordIdx,
+  ImportRecordMeta, IndexModules, ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper,
+  StmtInfoIdx, SymbolRef, SymbolRefDb, UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -628,10 +628,35 @@ fn collect_frozen_reexport_usage(input: &OrderLoweringInput<'_>) -> FrozenReexpo
   for (root, path) in &mut root_paths {
     path.sort_unstable_by_key(|(module_idx, rec_idx)| (module_idx.index(), rec_idx.index()));
     path.dedup();
-    nested_records.extend(path.iter().copied().filter(|record| record != root));
+    // A record is "nested" only when a wrapped ancestor barrel's traversal walks *through* its
+    // importer to reach a deeper wrapped target, so the ancestor already owns that init and the
+    // interior record must stay silent. But that traversal stops at the first wrapped barrel it
+    // meets (`collect_order_wrap_esm_init_targets` pushes it as the target and recurses no
+    // further), delegating the rest of the chain to that barrel's own `init_*`. A record whose
+    // importer is itself an init-wrapped barrel is therefore never walked through — it owns its
+    // own re-export hop — so it must not be suppressed. See issue family #8777 / #8989.
+    nested_records.extend(
+      path
+        .iter()
+        .copied()
+        .filter(|record| record != root)
+        .filter(|(module_idx, _)| !module_owns_reexport_init(input, *module_idx)),
+    );
   }
 
   FrozenReexportUsage { root_paths, nested_records, consumed_facades }
+}
+
+/// Whether `module_idx` carries its own ESM init wrapper — an interop `WrapKind::Esm` wrapper or an
+/// order wrapper selected by the plan — so an outer barrel's re-export traversal stops at it and
+/// delegates the remaining chain to its `init_*`. Concatenated-inner modules share the group's init
+/// rather than owning a standalone one, so they are excluded and remain walk-through.
+fn module_owns_reexport_init(input: &OrderLoweringInput<'_>, module_idx: ModuleIdx) -> bool {
+  matches!(
+    input.linking[module_idx].concatenated_wrapped_module_kind,
+    ConcatenateWrappedModuleKind::None
+  ) && (input.plan.contains(&module_idx)
+    || matches!(input.linking[module_idx].wrap_kind(), WrapKind::Esm))
 }
 
 fn retained_order_reexport_path(
