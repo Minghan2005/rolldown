@@ -782,6 +782,18 @@ importers:
         specifier: workspace:*
         version: link:../../..
 
+  packages/test-dev-server/tests/playground/hmr-patch-dedup:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/hmr-reconnect-ship-map:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
   packages/test-dev-server/tests/playground/hmr-runtime-acceptance:
     devDependencies:
       '@rolldown/test-dev-server':
@@ -801,6 +813,12 @@ importers:
         version: link:../../..
 
   packages/test-dev-server/tests/playground/lazy-compilation:
+    devDependencies:
+      '@rolldown/test-dev-server':
+        specifier: workspace:*
+        version: link:../../..
+
+  packages/test-dev-server/tests/playground/lazy-overlap-dedup:
     devDependencies:
       '@rolldown/test-dev-server':
         specifier: workspace:*
