@@ -87,6 +87,13 @@ Two shapes were challenged and deliberately kept:
 - Changing CJS or require-of-ESM interop output when no order wrapper is selected.
 - Moving general tree-shaking state out of `LinkingMetadata`; this design isolates only post-planning synthetic state.
 
+### Contract boundaries: no ordering promise, but always valid output
+
+Two input classes are outside the ordering promise, yet the emitted code must stay valid and executable:
+
+- **Top-level await.** Order wrapping makes no TLA promise beyond the default build. Mechanically it stays valid: a TLA-tainted module (or one that transitively depends on one) gets an `async` wrapper body, and every emitted `init_*()` call site awaits when the target is tainted (`EsmInitTarget::tla_tainted`), so the taint propagates with the wrappers and `await` never lands in a sync function. Pinned by the executed fixtures under `tests/rolldown/topics/tla/` (both strict modes as config variants, including shared-chunk, cycle-ring, dynamic-root, and entry-also-imported shapes).
+- **External modules.** A static ESM `import` of an external cannot be deferred without changing semantics (it hoists to the top of its chunk and evaluates at chunk load), so an external's side effects can run earlier than source order when its importer is wrapped — for static ESM output this is unfixable by wrapping and matches every other bundler. Emitted code stays valid: external import statements survive at chunk top and wrapped importers reference their bindings from inside closures. Pinned by the executed fixtures `external_builtin_in_wrapped_module` and `entry_external_reexport_facade` (both strict modes).
+
 ## Rejected Alternatives
 
 ### Late `WrapKind` override

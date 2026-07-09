@@ -1,6 +1,9 @@
 {
   "configVariants": [
     {
+      "strictExecutionOrder": true
+    },
+    {
       "strictExecutionOrder": true,
       "onDemandWrapping": true
     }
