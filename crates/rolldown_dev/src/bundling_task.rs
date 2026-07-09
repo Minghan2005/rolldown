@@ -160,10 +160,15 @@ impl BundlingTask {
       .collect::<FxIndexMap<_, _>>();
 
     // Read-only per-client inputs for this push. No seq here: it is assigned after compute,
-    // only to the patches we actually deliver (see below).
-    let mut client_sessions = self.dev_context.clients.lock().await;
+    // only to the patches we actually deliver (see below). Snapshot the ids and release the
+    // clients lock before the compute await — nothing per-client is read during compute, and
+    // holding it would block connect/disconnect for the whole rebuild.
+    let client_ids: Vec<String> = {
+      let client_sessions = self.dev_context.clients.lock().await;
+      client_sessions.keys().cloned().collect()
+    };
     let client_inputs: Vec<ClientHmrInput> =
-      client_sessions.keys().map(|client_key| ClientHmrInput { client_id: client_key }).collect();
+      client_ids.iter().map(|client_id| ClientHmrInput { client_id: client_id.as_str() }).collect();
 
     // Compute HMR updates for all clients in one call
     let mut hmr_result = bundler
@@ -179,8 +184,10 @@ impl BundlingTask {
     // `HmrUpdate::Patch`. A `HmrUpdate::Noop` sends nothing, and a `HmrUpdate::FullReload`
     // is sent without a seq, so neither advances the counter. The client enforces a strict
     // `seq === lastSeq + 1`, so consuming a seq without delivering an envelope would leave a
-    // gap and trigger a spurious full reload.
+    // gap and trigger a spurious full reload. A client that disconnected during compute is
+    // simply absent here; its update is dropped unstamped.
     if let Ok(client_updates) = &mut hmr_result {
+      let mut client_sessions = self.dev_context.clients.lock().await;
       for update in client_updates.iter_mut() {
         if let HmrUpdate::Patch(patch) = &mut update.update {
           if let Some(session) = client_sessions.get_mut(&update.client_id) {
@@ -190,7 +197,6 @@ impl BundlingTask {
         }
       }
     }
-    drop(client_sessions);
 
     // Check if any update is a full reload (only if successful)
     if let Ok(client_updates) = &hmr_result {

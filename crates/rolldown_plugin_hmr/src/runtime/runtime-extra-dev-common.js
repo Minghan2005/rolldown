@@ -79,10 +79,12 @@ export class DevRuntime {
   /**
    * The module cache. Membership means "this module's side effects ran in this tab" —
    * registration is emitted ahead of every module body, and nothing un-registers on
-   * unwind, so a factory that throws mid-body stays registered.
-   * @type {Record<string, Module>}
+   * unwind, so a factory that throws mid-body stays registered. A `Map` rather than a
+   * plain object: HMR eviction deletes entries, and a `delete` on an object drops V8
+   * into dictionary mode, taxing every later lookup on the hottest read path.
+   * @type {Map<string, Module>}
    */
-  moduleCache = {};
+  moduleCache = new Map();
   /**
    * Re-runnable factories from HMR patches and lazy chunks. The initial bundle stays
    * scope-hoisted and contributes none.
@@ -150,7 +152,7 @@ export class DevRuntime {
   registerModule(id, exportsHolder) {
     const module = new Module(id);
     module.exportsHolder = exportsHolder;
-    this.moduleCache[id] = module;
+    this.moduleCache.set(id, module);
   }
 
   /**
@@ -172,7 +174,7 @@ export class DevRuntime {
    * @param {string} id
    */
   isExecuted(id) {
-    return !!this.moduleCache[id];
+    return this.moduleCache.has(id);
   }
 
   /**
@@ -188,7 +190,7 @@ export class DevRuntime {
    * @param {string} id
    */
   removeModuleCache(id) {
-    delete this.moduleCache[id];
+    this.moduleCache.delete(id);
     this.hooks?.onModuleCacheRemoval(id);
   }
 
@@ -198,7 +200,7 @@ export class DevRuntime {
    * @param {string} id
    */
   initModule(id) {
-    if (this.moduleCache[id]) {
+    if (this.moduleCache.has(id)) {
       return this.loadExports(id);
     }
     const factory = this.factories.get(id);
@@ -213,7 +215,7 @@ export class DevRuntime {
    * @param {string} id
    */
   loadExports(id) {
-    const module = this.moduleCache[id];
+    const module = this.moduleCache.get(id);
     if (module) {
       return module.exportsHolder.exports;
     } else {

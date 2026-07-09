@@ -143,13 +143,16 @@ class TestDevRuntime extends BaseDevRuntime {
       if (stack.includes(parent)) {
         return `circular import chain between \`${id}\` and \`${parent}\``;
       }
+      // One shared stack with push/pop instead of a copy per recursion level.
+      stack.push(parent);
       const fullReloadReason = this.__testBubble(
         parent,
-        [...stack, parent],
+        stack,
         updateSet,
         boundaries,
         traversedModules,
       );
+      stack.pop();
       if (fullReloadReason) return fullReloadReason;
     }
   }

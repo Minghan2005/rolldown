@@ -226,12 +226,19 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
         affected.extend(new_added_modules.iter().copied());
         affected.retain(|idx| self.module_table().modules[*idx].is_normal());
 
-        // 3. Every client receives the full affected set. The per-client delivery
-        // ledger (`shipped[C]`) that narrows this to what each tab lacks lands in a
-        // follow-up; re-shipped factories are idempotent, so this only costs bytes.
-        for client in clients {
-          let update = self.render_hmr_patch(affected.clone(), changed_ids.clone()).await?;
-          client_updates.push(ClientHmrUpdate { client_id: client.client_id.to_string(), update });
+        // 3. Every client receives the full affected set. The per-client ship map
+        // (`shipped[C]`) that narrows this to what each tab lacks lands in a
+        // follow-up; until then the patch depends on no per-client input, so render
+        // it once and fan the same payload out (`seq` is stamped per client after
+        // compute).
+        if !clients.is_empty() {
+          let update = self.render_hmr_patch(affected, changed_ids).await?;
+          for client in clients {
+            client_updates.push(ClientHmrUpdate {
+              client_id: client.client_id.to_string(),
+              update: update.clone(),
+            });
+          }
         }
       }
     }
@@ -276,7 +283,7 @@ impl<'a, Fs: FileSystem + Clone + 'static> HmrStage<'a, Fs> {
   /// Compile a lazy entry module and return the compiled chunk.
   ///
   /// The chunk carries every reachable sync dependency's factory — never filtered by
-  /// execution state. The per-client delivery ledger that narrows this to what each
+  /// execution state. The per-client ship map that narrows this to what each
   /// tab lacks lands in a follow-up; re-shipped factories are idempotent.
   pub async fn compile_lazy_entry(
     &mut self,

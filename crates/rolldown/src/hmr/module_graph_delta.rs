@@ -1,6 +1,6 @@
 use json_escape_simd::escape;
 use rolldown_common::{Module, ModuleIdx, ModuleTable, RUNTIME_MODULE_KEY};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Renders the compiler-emitted `__rolldown_runtime__.registerGraph(...)` prelude for a
 /// payload carrying `carried_modules` — pure module-graph topology (static + dynamic edges).
@@ -37,10 +37,16 @@ pub fn render_register_graph_source(
 
   let mut edges: Vec<Vec<usize>> = Vec::with_capacity(local_count);
   let mut dynamic_edges: Vec<Vec<usize>> = Vec::with_capacity(local_count);
+  // Reused across modules: dedup import records targeting the same module without a
+  // linear rescan of the edge list per record (quadratic for high-fan-out modules).
+  let mut seen_static = FxHashSet::default();
+  let mut seen_dynamic = FxHashSet::default();
   for i in 0..local_count {
     let Module::Normal(module) = &module_table.modules[ids[i]] else {
       unreachable!("carried rows are filtered to normal modules above");
     };
+    seen_static.clear();
+    seen_dynamic.clear();
     let mut out_edges = Vec::new();
     let mut dyn_out_edges = Vec::new();
     for record in &module.import_records {
@@ -60,10 +66,10 @@ pub fn render_register_graph_source(
         ids.len() - 1
       });
       if record.kind.is_static() {
-        if !out_edges.contains(&target_pos) {
+        if seen_static.insert(target_pos) {
           out_edges.push(target_pos);
         }
-      } else if !dyn_out_edges.contains(&target_pos) {
+      } else if seen_dynamic.insert(target_pos) {
         dyn_out_edges.push(target_pos);
       }
     }

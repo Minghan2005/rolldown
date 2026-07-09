@@ -233,7 +233,7 @@ impl BindingDevEngine {
   }
 
   /// Client-connect signal (the clientId hello): creates the per-client session
-  /// with an empty delivery ledger. Reconnects arrive as fresh clientIds.
+  /// with an empty ship map. Reconnects arrive as fresh clientIds.
   #[napi(ts_return_type = "Promise<void>")]
   pub fn register_client<'env>(
     &self,

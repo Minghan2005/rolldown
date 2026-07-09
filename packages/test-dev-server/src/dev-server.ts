@@ -6,7 +6,6 @@ import serveStatic from 'serve-static';
 import { WebSocketServer } from 'ws';
 import { FullBundleDevEnvironment } from './environments/full-bundle-dev-environment.js';
 import { statusMiddleware } from './middlewares/status.js';
-import { decodeClientMessage } from './utils/decode-client-message.js';
 import type { Logger } from './types/logger.js';
 import type { DevConfig } from './utils/define-dev-config.js';
 import { loadDevConfig } from './utils/load-dev-config.js';
@@ -200,11 +199,8 @@ class DevServer {
         env.disconnectClient(client.id);
         this.#logger.info(`Client ${client.id} disconnected`);
       });
-      ws.on('message', (rawData) => {
-        // No upstream state exists under the client-side HMR design; inbound messages
-        // are legacy no-ops and are ignored.
-        decodeClientMessage(rawData);
-      });
+      // No 'message' handler on purpose: no upstream state exists under the client-side
+      // HMR design, so inbound messages are dropped without decoding.
     });
   }
 

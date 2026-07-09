@@ -7,7 +7,7 @@ import { browserLogs, editFile, page, waitForBuildStable } from '~utils';
 // page). No websocket round trip is involved — the server never hears about
 // the invalidate.
 //
-// Factory coverage comes from the delivery ledger: an edit of `inner` ships
+// Factory coverage comes from the ship map: an edit of `inner` ships
 // only inner's factory (the server's update-superset walk stops at inner's static
 // self-accept), so on a COLD session the invalidate re-walk finds no factory
 // for `outer` and falls back to a clean reload. Once outer's factory has been

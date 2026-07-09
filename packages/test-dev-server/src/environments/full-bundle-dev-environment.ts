@@ -111,7 +111,7 @@ export class FullBundleDevEnvironment {
   connectClient(ws: WebSocket, clientId: string): ClientSession {
     const client = new ClientSession(ws, clientId);
     this.#clients.setupIfNeeded(client);
-    // create the server-side session (fresh shipped[C] ledger) used to select the
+    // create the server-side session (fresh `shipped[C]` ship map) used to select the
     // factories each patch ships to this client
     void this.#devEngine.registerClient(clientId);
 

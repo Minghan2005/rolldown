@@ -279,8 +279,8 @@ impl DevEngine {
 
   /// Delivery notification from the serving middleware: the response for `filename`
   /// completed. Currently a no-op — every push ships the full affected factory set.
-  /// The per-client delivery ledger that consumes this signal lands in a follow-up.
-  #[expect(clippy::unused_async, reason = "the ledger follow-up awaits its state locks here")]
+  /// The per-client ship map that consumes this signal lands in a follow-up.
+  #[expect(clippy::unused_async, reason = "the ship-map follow-up awaits its state locks here")]
   pub async fn notify_payload_delivered(&self, _filename: &str) {}
 
   /// Compile a lazy entry module and return compiled code.

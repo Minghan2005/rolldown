@@ -135,6 +135,9 @@ fn render_chunk_content<'code>(
   } else {
     None
   };
+  // The per-module runtime checks below are reached through `take_if`, so they run only
+  // while a prelude is still pending — never in production, and at most until the runtime
+  // module is found in dev.
   let is_runtime_module =
     |idx: ModuleIdx| ctx.link_output.module_table[idx].id().as_str() == RUNTIME_MODULE_KEY;
   let chunk_carries_runtime =
@@ -154,10 +157,8 @@ fn render_chunk_content<'code>(
             source_joiner.append_source(source);
           }
         }
-        if is_runtime_module(*module_idx) {
-          if let Some(prelude) = dev_graph_prelude.take() {
-            source_joiner.append_source(prelude);
-          }
+        if let Some(prelude) = dev_graph_prelude.take_if(|_| is_runtime_module(*module_idx)) {
+          source_joiner.append_source(prelude);
         }
       },
     );
@@ -183,10 +184,8 @@ fn render_chunk_content<'code>(
           source_joiner.append_source(source);
         }
       }
-      if is_runtime_module(group.entry) {
-        if let Some(prelude) = dev_graph_prelude.take() {
-          source_joiner.append_source(prelude);
-        }
+      if let Some(prelude) = dev_graph_prelude.take_if(|_| is_runtime_module(group.entry)) {
+        source_joiner.append_source(prelude);
       }
       continue;
     }
@@ -269,10 +268,10 @@ fn render_chunk_content<'code>(
     }
     postfix += ");\n";
     source_joiner.append_source(postfix);
-    if group.modules.iter().copied().any(is_runtime_module) {
-      if let Some(prelude) = dev_graph_prelude.take() {
-        source_joiner.append_source(prelude);
-      }
+    if let Some(prelude) =
+      dev_graph_prelude.take_if(|_| group.modules.iter().copied().any(is_runtime_module))
+    {
+      source_joiner.append_source(prelude);
     }
   }
   if let Some(prelude) = dev_graph_prelude.take() {

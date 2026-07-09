@@ -1,4 +1,4 @@
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HmrPatch {
   pub code: String,
   pub filename: String,

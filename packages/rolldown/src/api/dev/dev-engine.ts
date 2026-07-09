@@ -126,7 +126,7 @@ export class DevEngine {
 
   /**
    * Client-connect signal (the clientId hello): creates the per-client session
-   * with an empty delivery ledger. Reconnects arrive as fresh clientIds.
+   * with an empty ship map. Reconnects arrive as fresh clientIds.
    */
   async registerClient(clientId: string): Promise<void> {
     await this.#inner.registerClient(clientId);
