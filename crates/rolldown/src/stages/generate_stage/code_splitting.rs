@@ -252,7 +252,7 @@ impl GenerateStage<'_> {
     // EntryPoint (is_user_defined: true) < EntryPoint (is_user_defined: false) or Common
     // [order by chunk index]               [order by exec order]
 
-    chunk_graph.rebuild_sorted_chunk_idx_vec();
+    chunk_graph.rebuild_sorted_chunk_idx_vec(false);
 
     Ok(chunk_graph)
   }
@@ -537,13 +537,9 @@ impl GenerateStage<'_> {
         // exist regardless of the module's exports_kind (e.g. empty modules have
         // ExportsKind::None but still need their namespace declaration when exported
         // cross-chunk).
-        let order_requires_namespace =
-          order_state.requires_namespace(m.namespace_object_ref, |importer_idx| {
-            chunk_graph.module_to_chunk[importer_idx].is_some_and(|chunk_idx| {
-              chunk_graph.post_chunk_optimization_operations.get(&chunk_idx)
-                != Some(&PostChunkOptimizationOperation::Removed)
-                && chunk_graph.chunk_table[chunk_idx].modules.contains(&importer_idx)
-            })
+        let order_requires_namespace = order_state
+          .requires_namespace(m.namespace_object_ref, |importer_idx| {
+            chunk_graph.module_is_in_live_chunk(importer_idx)
           });
         let is_namespace_referenced = if order_requires_namespace
           || module_namespace_included_reason

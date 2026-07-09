@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use oxc_index::{IndexVec, index_vec};
+use petgraph::prelude::DiGraphMap;
 use rolldown_common::{
   ChunkIdx, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx, Module, ModuleIdx,
   SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
@@ -77,6 +78,7 @@ impl GenerateStage<'_> {
     }
 
     let import_edges = self.predicted_static_import_edges(chunk_graph, used_symbol_refs);
+    let chunk_cycles = ChunkCycles::from_import_edges(&import_edges);
     let mut all_at_risk = FxHashSet::default();
     let mut roots = Vec::new();
 
@@ -94,7 +96,7 @@ impl GenerateStage<'_> {
       let mut at_risk = self.at_risk_modules(&expected_order, &actual_order, &trigger_hosts);
       // Lowering can change the entry edge into a static chunk cycle, so wrap every eligible
       // source module under a root that reaches one.
-      if reaches_chunk_cycle(root_chunk, &import_edges) {
+      if chunk_cycles.reachable_from(root_chunk, &import_edges) {
         at_risk
           .extend(expected_order.iter().copied().filter(|idx| self.is_order_wrap_eligible(*idx)));
       }
@@ -102,17 +104,20 @@ impl GenerateStage<'_> {
       roots.push(RootOrderAnalysis { root, expected_order });
     }
 
-    let plan = self.build_order_wrap_plan(all_at_risk, &roots, chunk_graph, &import_edges);
+    let plan = self.build_order_wrap_plan(all_at_risk, &roots, chunk_graph, &chunk_cycles);
     Some(OrderAnalysis { plan, import_edges })
   }
 
   fn wrap_all_order_analysis(&self, chunk_graph: &ChunkGraph) -> OrderAnalysis {
     let mut plan = OrderWrapPlan::default();
+    // Only membership matters here, so one shared visit-state vector lets every module be
+    // walked once across all roots instead of once per root.
+    let mut states = index_vec![VisitState::Unvisited; self.link_output.module_table.modules.len()];
     for &root in self.link_output.entries.keys() {
       if !self.link_output.metas[root].is_included {
         continue;
       }
-      for module_idx in self.expected_order_for_root(root) {
+      for module_idx in self.expected_order_for_root_with_states(root, &mut states) {
         if self.is_order_wrap_eligible(module_idx) {
           plan.insert(module_idx);
         }
@@ -126,9 +131,17 @@ impl GenerateStage<'_> {
 
   fn expected_order_for_root(&self, root: ModuleIdx) -> Vec<ModuleIdx> {
     let mut states = index_vec![VisitState::Unvisited; self.link_output.module_table.modules.len()];
+    self.expected_order_for_root_with_states(root, &mut states)
+  }
+
+  fn expected_order_for_root_with_states(
+    &self,
+    root: ModuleIdx,
+    states: &mut IndexVec<ModuleIdx, VisitState>,
+  ) -> Vec<ModuleIdx> {
     let mut order = Vec::new();
 
-    if !self.link_output.module_table[root].is_normal() {
+    if !self.link_output.module_table[root].is_normal() || states[root] != VisitState::Unvisited {
       return order;
     }
 
@@ -332,7 +345,7 @@ impl GenerateStage<'_> {
     at_risk: FxHashSet<ModuleIdx>,
     roots: &[RootOrderAnalysis],
     chunk_graph: &ChunkGraph,
-    import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+    chunk_cycles: &ChunkCycles,
   ) -> OrderWrapPlan {
     let source_reachable = self.source_reachable_modules(roots);
     let mut plan = OrderWrapPlan::default();
@@ -345,7 +358,7 @@ impl GenerateStage<'_> {
     loop {
       let mut changed = false;
       changed |= self.close_expected_sensitive_suffixes(roots, &mut plan);
-      changed |= self.close_cyclic_chunk_members(chunk_graph, import_edges, &mut plan);
+      changed |= self.close_cyclic_chunk_members(chunk_graph, chunk_cycles, &mut plan);
 
       let current = plan.modules().collect::<FxHashSet<_>>();
 
@@ -374,29 +387,18 @@ impl GenerateStage<'_> {
   fn close_cyclic_chunk_members(
     &self,
     chunk_graph: &ChunkGraph,
-    import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+    chunk_cycles: &ChunkCycles,
     plan: &mut OrderWrapPlan,
   ) -> bool {
-    let planned_chunks = plan
+    let triggered_sccs = plan
       .modules()
       .filter_map(|module_idx| chunk_graph.module_to_chunk[module_idx])
+      .filter_map(|chunk_idx| chunk_cycles.scc_of_chunk.get(&chunk_idx).copied())
       .collect::<FxHashSet<_>>();
-    let mut reverse_edges = index_vec![FxHashSet::default(); import_edges.len()];
-    for (importer_idx, importees) in import_edges.iter_enumerated() {
-      for &importee_idx in importees {
-        reverse_edges[importee_idx].insert(importer_idx);
-      }
-    }
     let mut changed = false;
 
-    for root_chunk in planned_chunks {
-      let forward = reachable_chunks(root_chunk, import_edges);
-      let backward = reachable_chunks(root_chunk, &reverse_edges);
-      let cycle = forward.intersection(&backward).copied().collect::<FxHashSet<_>>();
-      if cycle.len() < 2 && !import_edges[root_chunk].contains(&root_chunk) {
-        continue;
-      }
-      for chunk_idx in cycle {
+    for scc_idx in triggered_sccs {
+      for &chunk_idx in &chunk_cycles.sccs[scc_idx] {
         for &module_idx in &chunk_graph.chunk_table[chunk_idx].modules {
           if self.is_order_sensitive(module_idx) && self.is_order_wrap_eligible(module_idx) {
             changed |= plan.insert(module_idx);
@@ -630,30 +632,59 @@ impl GenerateStage<'_> {
   }
 }
 
-/// Whether any static chunk cycle is reachable from `root_chunk` over the predicted edges.
-fn reaches_chunk_cycle(
-  root_chunk: ChunkIdx,
-  import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
-) -> bool {
-  let mut states = index_vec![VisitState::Unvisited; import_edges.len()];
-  let mut stack = vec![(root_chunk, import_edges[root_chunk].iter())];
-  states[root_chunk] = VisitState::Visiting;
-  while let Some((chunk_idx, edges)) = stack.last_mut() {
-    let Some(&importee_chunk) = edges.next() else {
-      states[*chunk_idx] = VisitState::Done;
-      stack.pop();
-      continue;
-    };
-    match states[importee_chunk] {
-      VisitState::Visiting => return true,
-      VisitState::Done => {}
-      VisitState::Unvisited => {
-        states[importee_chunk] = VisitState::Visiting;
-        stack.push((importee_chunk, import_edges[importee_chunk].iter()));
+/// Nontrivial strongly connected components (two or more chunks, or a self-loop) of the
+/// predicted chunk-import graph. Both cycle consumers read it: the per-root bailout and the
+/// plan closure.
+struct ChunkCycles {
+  scc_of_chunk: FxHashMap<ChunkIdx, usize>,
+  sccs: Vec<Vec<ChunkIdx>>,
+}
+
+impl ChunkCycles {
+  fn from_import_edges(import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>) -> Self {
+    let mut graph = DiGraphMap::<ChunkIdx, ()>::new();
+    for (importer_idx, importees) in import_edges.iter_enumerated() {
+      graph.add_node(importer_idx);
+      for &importee_idx in importees {
+        graph.add_edge(importer_idx, importee_idx, ());
       }
     }
+    let mut scc_of_chunk = FxHashMap::default();
+    let mut sccs = Vec::new();
+    for scc in petgraph::algo::tarjan_scc(&graph) {
+      if scc.len() < 2 && !import_edges[scc[0]].contains(&scc[0]) {
+        continue;
+      }
+      for &chunk_idx in &scc {
+        scc_of_chunk.insert(chunk_idx, sccs.len());
+      }
+      sccs.push(scc);
+    }
+    Self { scc_of_chunk, sccs }
   }
-  false
+
+  /// Whether any static chunk cycle is reachable from `root_chunk` over the predicted edges.
+  fn reachable_from(
+    &self,
+    root_chunk: ChunkIdx,
+    import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+  ) -> bool {
+    if self.scc_of_chunk.is_empty() {
+      return false;
+    }
+    let mut visited = FxHashSet::default();
+    let mut pending = vec![root_chunk];
+    while let Some(chunk_idx) = pending.pop() {
+      if !visited.insert(chunk_idx) {
+        continue;
+      }
+      if self.scc_of_chunk.contains_key(&chunk_idx) {
+        return true;
+      }
+      pending.extend(import_edges[chunk_idx].iter().copied());
+    }
+    false
+  }
 }
 
 fn premature_sensitive_modules(
@@ -678,20 +709,6 @@ fn premature_sensitive_modules(
   }
 
   premature_modules
-}
-
-fn reachable_chunks(
-  root: ChunkIdx,
-  import_edges: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
-) -> FxHashSet<ChunkIdx> {
-  let mut reachable = FxHashSet::default();
-  let mut pending = vec![root];
-  while let Some(chunk_idx) = pending.pop() {
-    if reachable.insert(chunk_idx) {
-      pending.extend(import_edges[chunk_idx].iter().copied());
-    }
-  }
-  reachable
 }
 
 #[cfg(test)]

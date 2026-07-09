@@ -2,8 +2,8 @@ use oxc::ast::ast::{Declaration, Statement};
 use oxc_index::IndexVec;
 use rolldown_common::{
   ChunkIdx, ConcatenateWrappedModuleKind, ExportsKind, ImportKind, ImportRecordIdx,
-  ImportRecordMeta, IndexModules, Module, ModuleIdx, NormalModule, PostChunkOptimizationOperation,
-  StmtInfoIdx, StmtInfos, WrapKind,
+  ImportRecordMeta, IndexModules, Module, ModuleIdx, NormalModule, StmtInfoIdx, StmtInfos,
+  WrapKind,
 };
 use rolldown_ecmascript::EcmaAst;
 use rolldown_utils::{index_vec_ext::IndexVecRefExt, rayon::ParallelIterator as _};
@@ -31,6 +31,8 @@ impl GenerateStage<'_> {
   ) {
     // Classify in parallel (read-only); the cheap write-back stays sequential.
     let keep_names = self.options.keep_names;
+    // Off-strict, lowering never mutates the chunk graph, so the liveness guard cannot fire.
+    let strict = self.options.is_strict_execution_order_enabled();
     let metas = &self.link_output.metas;
     let modules = &self.link_output.module_table.modules;
     let stmt_infos_vec = &self.link_output.stmt_infos;
@@ -47,7 +49,7 @@ impl GenerateStage<'_> {
         let targets_by_stmt = modules[module_idx]
           .as_normal()
           .zip(module_to_chunk[module_idx])
-          .filter(|_| module_has_live_chunk(chunk_graph, module_idx))
+          .filter(|_| !strict || chunk_graph.module_is_in_live_chunk(module_idx))
           .map(|(module, chunk_idx)| {
             transitive_esm_init_targets(
               module,
@@ -298,9 +300,8 @@ fn collect_order_wrap_esm_init_targets(
     // Only collect modules whose wrapper is declared (i.e. the module is included in the output)
     // and assigned to a chunk. Cross-chunk wrapper imports are registered after this pass.
     if importee_linking_info.is_included
-      && esm_init_target_is_included_in_live_chunk(
+      && order_state.esm_init_included_in_live_chunk(
         importee_linking_info,
-        order_state,
         importee.idx,
         chunk_graph,
       )
@@ -331,37 +332,4 @@ fn collect_order_wrap_esm_init_targets(
       }
     }
   }
-}
-
-fn esm_init_target_is_included_in_live_chunk(
-  meta: &LinkingMetadata,
-  order_state: &OrderWrapState,
-  module_idx: ModuleIdx,
-  chunk_graph: &ChunkGraph,
-) -> bool {
-  let Some(target) = order_state.esm_init_target(module_idx, meta) else {
-    return false;
-  };
-  match target.origin {
-    EsmInitOrigin::Interop => {
-      meta
-        .wrapper_stmt_info
-        .is_some_and(|stmt_info_idx| meta.stmt_info_included.has_bit(stmt_info_idx))
-        && module_has_live_chunk(chunk_graph, module_idx)
-    }
-    EsmInitOrigin::ExecutionOrder => {
-      order_state.order_wrapper_chunk(module_idx).is_some_and(|chunk_idx| {
-        module_has_live_chunk(chunk_graph, module_idx)
-          && chunk_graph.module_to_chunk[module_idx] == Some(chunk_idx)
-      })
-    }
-  }
-}
-
-fn module_has_live_chunk(chunk_graph: &ChunkGraph, module_idx: ModuleIdx) -> bool {
-  chunk_graph.module_to_chunk[module_idx].is_some_and(|chunk_idx| {
-    chunk_graph.post_chunk_optimization_operations.get(&chunk_idx)
-      != Some(&PostChunkOptimizationOperation::Removed)
-      && chunk_graph.chunk_table[chunk_idx].modules.contains(&module_idx)
-  })
 }

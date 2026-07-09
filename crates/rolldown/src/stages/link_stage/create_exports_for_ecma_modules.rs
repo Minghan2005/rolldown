@@ -132,7 +132,7 @@ impl LinkStage<'_> {
       }
     }
 
-    if !self.options.strict_execution_order {
+    if !self.options.is_strict_execution_order_enabled() {
       return;
     }
     for (entry_idx, entries) in &self.entries {

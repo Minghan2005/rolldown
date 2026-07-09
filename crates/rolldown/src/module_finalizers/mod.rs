@@ -1594,10 +1594,8 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
     // skip first statement info to make sure `program.body` has same index as `stmt_infos`
     old_body.into_iter().enumerate().zip(self.ctx.stmt_infos.iter_enumerated().skip(1)).for_each(
       |((_top_stmt_idx, mut top_stmt), (stmt_info_idx, stmt_info))| {
-        let is_order_runtime_stmt = self.ctx.idx == self.ctx.runtime.id()
-          && stmt_info.declared_symbols.iter().any(|declared| {
-            self.ctx.order_wrap_state.requires_runtime_symbol(self.ctx.runtime, declared.inner())
-          });
+        let is_order_runtime_stmt =
+          self.ctx.order_wrap_state.forces_runtime_stmt(self.ctx.runtime, self.ctx.idx, stmt_info);
         let is_stmt_included =
           self.ctx.linking_info.stmt_info_included.has_bit(stmt_info_idx) || is_order_runtime_stmt;
 

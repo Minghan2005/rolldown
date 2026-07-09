@@ -418,7 +418,7 @@ impl GenerateStage<'_> {
     chunk_graph
       .chunk_table
       .iter_enumerated()
-      .filter_map(|(chunk_idx, _)| is_live_chunk(chunk_graph, chunk_idx).then_some(chunk_idx))
+      .filter_map(|(chunk_idx, _)| chunk_graph.chunk_is_live(chunk_idx).then_some(chunk_idx))
       .collect_vec()
   }
 
@@ -426,12 +426,7 @@ impl GenerateStage<'_> {
     let live_chunks = chunk_graph
       .chunk_table
       .iter_enumerated()
-      .filter(|(chunk_idx, _)| {
-        !matches!(
-          chunk_graph.post_chunk_optimization_operations.get(chunk_idx),
-          Some(PostChunkOptimizationOperation::Removed)
-        )
-      })
+      .filter(|(chunk_idx, _)| chunk_graph.chunk_is_live(*chunk_idx))
       .sorted_by_key(|(chunk_idx, chunk)| (chunk.exec_order, chunk_idx.raw()))
       .map(|(chunk_idx, _)| chunk_idx)
       .collect_vec();
@@ -441,23 +436,7 @@ impl GenerateStage<'_> {
         exec_order.try_into().expect("Too many chunks, u32 overflowed.");
     }
 
-    chunk_graph.sorted_chunk_idx_vec = chunk_graph
-      .chunk_table
-      .iter_enumerated()
-      .filter(|(chunk_idx, _)| {
-        !matches!(
-          chunk_graph.post_chunk_optimization_operations.get(chunk_idx),
-          Some(PostChunkOptimizationOperation::Removed)
-        )
-      })
-      .sorted_unstable_by_key(|(index, chunk)| match &chunk.kind {
-        ChunkKind::EntryPoint { meta, .. } if meta.contains(ChunkMeta::UserDefinedEntry) => {
-          (0, index.raw())
-        }
-        _ => (1, chunk.exec_order),
-      })
-      .map(|(idx, _)| idx)
-      .collect();
+    chunk_graph.rebuild_sorted_chunk_idx_vec(true);
   }
 
   fn esm_runtime_helper(&self) -> RuntimeHelper {
@@ -663,11 +642,4 @@ fn retained_order_reexport_path(
       .iter()
       .any(|declared| facade_is_retained(declared.inner())))
   .then_some(vec![])
-}
-
-fn is_live_chunk(chunk_graph: &ChunkGraph, chunk_idx: ChunkIdx) -> bool {
-  !matches!(
-    chunk_graph.post_chunk_optimization_operations.get(&chunk_idx),
-    Some(PostChunkOptimizationOperation::Removed)
-  )
 }

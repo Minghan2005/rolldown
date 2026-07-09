@@ -1,6 +1,5 @@
 use super::GenerateStage;
 use crate::chunk_graph::ChunkGraph;
-use crate::types::linking_metadata::LinkingMetadata;
 use crate::utils::chunk::conflict_resolver::{ConflictResolver, deconflict_order_key};
 use crate::utils::chunk::normalize_preserve_entry_signature;
 use crate::utils::external_import_interop::external_import_needs_interop;
@@ -350,10 +349,8 @@ impl GenerateStage<'_> {
             });
           self.link_output.stmt_infos[module.idx].iter_enumerated().for_each(
             |(stmt_info_idx, stmt_info)| {
-              let is_order_runtime_stmt = module.idx == self.link_output.runtime.id()
-                && stmt_info.declared_symbols.iter().any(|declared| {
-                  order_state.requires_runtime_symbol(&self.link_output.runtime, declared.inner())
-                });
+              let is_order_runtime_stmt =
+                order_state.forces_runtime_stmt(&self.link_output.runtime, module.idx, stmt_info);
               if !self.link_output.metas[module.idx].stmt_info_included.has_bit(stmt_info_idx)
                 && !is_order_runtime_stmt
               {
@@ -511,32 +508,43 @@ impl GenerateStage<'_> {
     symbol_ref: SymbolRef,
   ) {
     let meta = &self.link_output.metas[symbol_ref.owner];
-    let init_target = order_state.esm_init_target(symbol_ref.owner, meta);
+    if !self.options.is_strict_execution_order_enabled() {
+      // Off-strict keeps main's exact shape: lowering never mutates the chunk graph, so the
+      // liveness guards below can never fire.
+      depended_symbols.insert(symbol_ref);
+      if matches!(meta.wrap_kind(), WrapKind::Esm)
+        && let Some(wrapper_ref) = meta.wrapper_ref
+        && wrapper_ref != symbol_ref
+      {
+        depended_symbols.insert(wrapper_ref);
+      }
+      return;
+    }
+
     if matches!(self.link_output.module_table[symbol_ref.owner], Module::Normal(_))
-      && !module_has_live_chunk(chunk_graph, symbol_ref.owner)
+      && !chunk_graph.module_is_in_live_chunk(symbol_ref.owner)
     {
       return;
     }
 
-    if init_target.is_some_and(|target| target.wrapper_ref == symbol_ref)
-      && !esm_init_target_is_included_in_live_chunk(
+    if let Some(target) = order_state.esm_init_target(symbol_ref.owner, meta) {
+      let target_is_live = order_state.init_target_included_in_live_chunk(
+        &target,
         meta,
-        order_state,
         symbol_ref.owner,
         chunk_graph,
-      )
-    {
+      );
+      if target.wrapper_ref == symbol_ref && !target_is_live {
+        return;
+      }
+      depended_symbols.insert(symbol_ref);
+      if target.wrapper_ref != symbol_ref && target_is_live {
+        depended_symbols.insert(target.wrapper_ref);
+      }
       return;
     }
 
     depended_symbols.insert(symbol_ref);
-
-    if let Some(target) = init_target
-      && target.wrapper_ref != symbol_ref
-      && esm_init_target_is_included_in_live_chunk(meta, order_state, symbol_ref.owner, chunk_graph)
-    {
-      depended_symbols.insert(target.wrapper_ref);
-    }
   }
 
   fn add_transitive_esm_init_depended_symbols(
@@ -550,8 +558,8 @@ impl GenerateStage<'_> {
     for targets in order_state.transitive_init_targets(module_idx, meta).values() {
       for &target_idx in targets {
         let meta = &self.link_output.metas[target_idx];
-        if esm_init_target_is_included_in_live_chunk(meta, order_state, target_idx, chunk_graph)
-          && let Some(target) = order_state.esm_init_target(target_idx, meta)
+        if let Some(target) = order_state.esm_init_target(target_idx, meta)
+          && order_state.init_target_included_in_live_chunk(&target, meta, target_idx, chunk_graph)
         {
           depended_symbols.insert(target.wrapper_ref);
         }
@@ -1099,34 +1107,6 @@ fn non_namespace_symbol_is_live(
   symbol_ref: SymbolRef,
 ) -> bool {
   used_symbol_refs.contains(&symbol_ref) || order_live_symbols.contains(&symbol_ref)
-}
-
-fn esm_init_target_is_included_in_live_chunk(
-  meta: &LinkingMetadata,
-  order_state: &super::order_wrap_state::OrderWrapState,
-  module_idx: ModuleIdx,
-  chunk_graph: &ChunkGraph,
-) -> bool {
-  let Some(target) = order_state.esm_init_target(module_idx, meta) else {
-    return false;
-  };
-  let declaration_is_live = match target.origin {
-    super::order_wrap_state::EsmInitOrigin::Interop => meta
-      .wrapper_stmt_info
-      .is_some_and(|stmt_info_idx| meta.stmt_info_included.has_bit(stmt_info_idx)),
-    super::order_wrap_state::EsmInitOrigin::ExecutionOrder => order_state
-      .order_wrapper_chunk(module_idx)
-      .is_some_and(|chunk_idx| chunk_graph.module_to_chunk[module_idx] == Some(chunk_idx)),
-  };
-  declaration_is_live && module_has_live_chunk(chunk_graph, module_idx)
-}
-
-fn module_has_live_chunk(chunk_graph: &ChunkGraph, module_idx: ModuleIdx) -> bool {
-  chunk_graph.module_to_chunk[module_idx].is_some_and(|chunk_idx| {
-    chunk_graph.post_chunk_optimization_operations.get(&chunk_idx)
-      != Some(&PostChunkOptimizationOperation::Removed)
-      && chunk_graph.chunk_table[chunk_idx].modules.contains(&module_idx)
-  })
 }
 
 // The same implementation with https://github.com/oxc-project/oxc/blob/crates_v0.86.0/crates/oxc_mangler/src/base54.rs#L30-L31

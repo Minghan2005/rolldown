@@ -324,6 +324,52 @@ impl OrderWrapState {
     let module = self.modules.get(&module_idx)?;
     self.synthetic_statements.get(module.wrapper_statement).and_then(|stmt| stmt.chunk)
   }
+
+  /// The target's wrapper declaration survives in the output: its declaring statement (interop)
+  /// or chunk assignment (order wrap) is retained, and the module sits in a live chunk.
+  pub(crate) fn init_target_included_in_live_chunk(
+    &self,
+    target: &EsmInitTarget,
+    meta: &crate::types::linking_metadata::LinkingMetadata,
+    module_idx: ModuleIdx,
+    chunk_graph: &crate::chunk_graph::ChunkGraph,
+  ) -> bool {
+    let declaration_is_live = match target.origin {
+      EsmInitOrigin::Interop => meta
+        .wrapper_stmt_info
+        .is_some_and(|stmt_info_idx| meta.stmt_info_included.has_bit(stmt_info_idx)),
+      EsmInitOrigin::ExecutionOrder => self
+        .order_wrapper_chunk(module_idx)
+        .is_some_and(|chunk_idx| chunk_graph.module_to_chunk[module_idx] == Some(chunk_idx)),
+    };
+    declaration_is_live && chunk_graph.module_is_in_live_chunk(module_idx)
+  }
+
+  pub(crate) fn esm_init_included_in_live_chunk(
+    &self,
+    meta: &crate::types::linking_metadata::LinkingMetadata,
+    module_idx: ModuleIdx,
+    chunk_graph: &crate::chunk_graph::ChunkGraph,
+  ) -> bool {
+    self.esm_init_target(module_idx, meta).is_some_and(|target| {
+      self.init_target_included_in_live_chunk(&target, meta, module_idx, chunk_graph)
+    })
+  }
+
+  /// A runtime statement that declares an order-required runtime symbol must stay included even
+  /// when tree shaking excluded it.
+  pub(crate) fn forces_runtime_stmt(
+    &self,
+    runtime: &RuntimeModuleBrief,
+    module_idx: ModuleIdx,
+    stmt_info: &rolldown_common::StmtInfo,
+  ) -> bool {
+    module_idx == runtime.id()
+      && stmt_info
+        .declared_symbols
+        .iter()
+        .any(|declared| self.requires_runtime_symbol(runtime, declared.inner()))
+  }
 }
 
 #[derive(Debug)]
@@ -364,7 +410,7 @@ pub struct OrderImportKey {
   pub(crate) record: ImportRecordIdx,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct OrderImportOverlay {
   pub(crate) referenced_symbols: Vec<SymbolRef>,
   pub(crate) runtime_helpers: RuntimeHelper,
@@ -378,14 +424,7 @@ impl OrderImportOverlay {
   pub(crate) fn transitive_reexport(
     retained_reexport_path: Vec<(ModuleIdx, ImportRecordIdx)>,
   ) -> Self {
-    Self {
-      referenced_symbols: vec![],
-      runtime_helpers: RuntimeHelper::default(),
-      requires_importer_namespace: false,
-      requires_importee_namespace: false,
-      reexports_dynamic_exports: false,
-      retained_reexport_path,
-    }
+    Self { retained_reexport_path, ..Self::default() }
   }
 
   #[expect(clippy::too_many_arguments)]
@@ -405,14 +444,7 @@ impl OrderImportOverlay {
       return None;
     }
 
-    let mut overlay = Self {
-      referenced_symbols: vec![],
-      runtime_helpers: RuntimeHelper::default(),
-      requires_importer_namespace: false,
-      requires_importee_namespace: false,
-      reexports_dynamic_exports: false,
-      retained_reexport_path: vec![],
-    };
+    let mut overlay = Self::default();
     let mut reference = |symbol_ref| {
       if !overlay.referenced_symbols.contains(&symbol_ref) {
         overlay.referenced_symbols.push(symbol_ref);

@@ -137,19 +137,21 @@ impl LinkStage<'_> {
         .collect::<FxHashMap<_, _>>();
 
       let mut module_stack = vec![];
-      let mut star_export_record_by_name = FxHashMap::default();
+      // The star-export origin map only feeds `record_star_reexport_path`, which is strict-only.
+      let mut star_export_record_by_name =
+        self.options.is_strict_execution_order_enabled().then(FxHashMap::default);
       if module.has_star_export() || module.ast_usage.contains(EcmaModuleAstUsage::IsCjsReexport) {
         Self::add_exports_for_export_star(
           &self.module_table.modules,
           &mut resolved_exports,
-          &mut star_export_record_by_name,
+          star_export_record_by_name.as_mut(),
           module_id,
           &mut module_stack,
           None,
         );
       }
       meta.resolved_exports = resolved_exports;
-      meta.star_export_record_by_name = star_export_record_by_name;
+      meta.star_export_record_by_name = star_export_record_by_name.unwrap_or_default();
     });
     let side_effects_modules = self
       .module_table
@@ -315,7 +317,7 @@ impl LinkStage<'_> {
   fn add_exports_for_export_star(
     normal_modules: &IndexModules,
     resolve_exports: &mut FxHashMap<CompactStr, ResolvedExport>,
-    star_export_record_by_name: &mut FxHashMap<CompactStr, ImportRecordIdx>,
+    mut star_export_record_by_name: Option<&mut FxHashMap<CompactStr, ImportRecordIdx>>,
     module_idx: ModuleIdx,
     module_stack: &mut Vec<ModuleIdx>,
     root_record: Option<ImportRecordIdx>,
@@ -392,8 +394,10 @@ impl LinkStage<'_> {
             exported_name.clone(),
             ResolvedExport::new(named_export.referenced, named_export.came_from_commonjs),
           );
-          if let Some(root_record) = root_record {
-            star_export_record_by_name.insert(exported_name.clone(), root_record);
+          if let Some(root_record) = root_record
+            && let Some(map) = star_export_record_by_name.as_deref_mut()
+          {
+            map.insert(exported_name.clone(), root_record);
           }
         }
       }
@@ -401,7 +405,7 @@ impl LinkStage<'_> {
       Self::add_exports_for_export_star(
         normal_modules,
         resolve_exports,
-        star_export_record_by_name,
+        star_export_record_by_name.as_deref_mut(),
         dep_id,
         module_stack,
         root_record,
@@ -901,7 +905,7 @@ impl BindImportsAndExportsContext<'_> {
 
       let rec = &module.import_records[named_import.record_idx];
       let Some(resolved_module_idx) = rec.resolved_module else { continue };
-      if self.options.strict_execution_order
+      if self.options.is_strict_execution_order_enabled()
         && let Specifier::Literal(name) = &named_import.imported
       {
         record_star_reexport_path(

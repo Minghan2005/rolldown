@@ -6,8 +6,7 @@ use oxc_index::IndexVec;
 use render_chunk_to_assets::set_emitted_chunk_preliminary_filenames;
 use rolldown_common::{
   ChunkIdx, ChunkKind, InstantiationKind, ModuleIdx, OutputExports, PackageJson, PathsOutputOption,
-  PostChunkOptimizationOperation, PreliminarySourcemapFilename, RUNTIME_HELPER_NAMES,
-  UsedSymbolRefs, UsedSymbolRefsBuilder,
+  PreliminarySourcemapFilename, RUNTIME_HELPER_NAMES, UsedSymbolRefs, UsedSymbolRefsBuilder,
 };
 use rolldown_devtools::{action, trace_action, trace_action_enabled};
 use rolldown_error::{BuildDiagnostic, BuildResult};
@@ -604,10 +603,7 @@ fn rendered_module_set(chunk_graph: &ChunkGraph) -> FxHashSet<ModuleIdx> {
   chunk_graph
     .chunk_table
     .iter_enumerated()
-    .filter(|(chunk_idx, _)| {
-      chunk_graph.post_chunk_optimization_operations.get(chunk_idx)
-        != Some(&PostChunkOptimizationOperation::Removed)
-    })
+    .filter(|(chunk_idx, _)| chunk_graph.chunk_is_live(*chunk_idx))
     .flat_map(|(_, chunk)| chunk.modules.iter().copied())
     .collect()
 }

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use rolldown_common::{
-  ConcatenateWrappedModuleKind, ModuleIdx, PostChunkOptimizationOperation, PrependRenderedImport,
-};
+use rolldown_common::{ConcatenateWrappedModuleKind, PrependRenderedImport};
 use rolldown_utils::{index_vec_ext::IndexVecExt as _, rayon::ParallelIterator as _};
 use rustc_hash::FxHashMap;
 use tracing::debug_span;
@@ -24,6 +22,8 @@ impl GenerateStage<'_> {
   ) {
     let has_enum_inlining = self.link_output.has_enum_inlining;
     let has_required_order_runtime = !order_state.required_runtime_helpers().is_empty();
+    // Off-strict, lowering never mutates the chunk graph, so the liveness guard cannot fire.
+    let strict = self.options.is_strict_execution_order_enabled();
 
     let transfer_parts_rendered_maps = debug_span!("finalize_modules").in_scope(|| {
       ast_table
@@ -33,7 +33,7 @@ impl GenerateStage<'_> {
             let is_required_order_runtime =
               m.idx == self.link_output.runtime.id() && has_required_order_runtime;
             (self.link_output.metas[m.idx].is_included || is_required_order_runtime)
-              && module_has_live_chunk(chunk_graph, *idx)
+              && (!strict || chunk_graph.module_is_in_live_chunk(*idx))
           })
         })
         .filter_map(|(idx, ast)| {
@@ -111,12 +111,4 @@ impl GenerateStage<'_> {
       }
     }
   }
-}
-
-fn module_has_live_chunk(chunk_graph: &ChunkGraph, module_idx: ModuleIdx) -> bool {
-  chunk_graph.module_to_chunk[module_idx].is_some_and(|chunk_idx| {
-    chunk_graph.post_chunk_optimization_operations.get(&chunk_idx)
-      != Some(&PostChunkOptimizationOperation::Removed)
-      && chunk_graph.chunk_table[chunk_idx].modules.contains(&module_idx)
-  })
 }
