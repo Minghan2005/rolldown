@@ -152,13 +152,49 @@ impl GenerateStage<'_> {
       imported_chunks
         .extend(importee_chunks.iter().copied().filter(|importee| *importee != chunk_idx));
     }
+    // A dynamic import evaluates its target's chunk, so an inline entry trigger hosted there
+    // would run the entry's whole program during that load (e.g. a manual group placing a
+    // dynamic target next to an entry). Predicted static edges cannot see these loads; collect
+    // the cross-chunk dynamic-import targets directly.
+    let mut dynamic_target_modules_by_chunk: FxHashMap<ChunkIdx, FxHashSet<ModuleIdx>> =
+      FxHashMap::default();
+    for module in
+      self.link_output.module_table.modules.iter().filter_map(|module| module.as_normal())
+    {
+      if !self.link_output.metas[module.idx].is_included {
+        continue;
+      }
+      let importer_chunk = chunk_graph.module_to_chunk[module.idx];
+      for rec in &module.import_records {
+        if rec.kind != ImportKind::DynamicImport {
+          continue;
+        }
+        let Some(importee_idx) = rec.resolved_module else { continue };
+        if !self.link_output.module_table[importee_idx].is_normal()
+          || !self.link_output.metas[importee_idx].is_included
+        {
+          continue;
+        }
+        let Some(importee_chunk) = chunk_graph.module_to_chunk[importee_idx] else { continue };
+        if importer_chunk == Some(importee_chunk) {
+          continue;
+        }
+        dynamic_target_modules_by_chunk.entry(importee_chunk).or_default().insert(importee_idx);
+      }
+    }
     entries_to_split.extend(self.link_output.entries.keys().copied().filter(|entry_module_idx| {
       !matches!(self.link_output.metas[*entry_module_idx].wrap_kind(), WrapKind::None)
         && (!on_demand
-          || chunk_graph
-            .entry_module_to_entry_chunk
-            .get(entry_module_idx)
-            .is_some_and(|entry_chunk_idx| imported_chunks.contains(entry_chunk_idx)))
+          || chunk_graph.entry_module_to_entry_chunk.get(entry_module_idx).is_some_and(
+            |entry_chunk_idx| {
+              imported_chunks.contains(entry_chunk_idx)
+                // A dynamic import of the entry module itself must run its program, so only
+                // other hosted targets force the split.
+                || dynamic_target_modules_by_chunk.get(entry_chunk_idx).is_some_and(|targets| {
+                  targets.iter().any(|target| target != entry_module_idx)
+                })
+            },
+          ))
     }));
     entries_to_split.sort_unstable_by_key(|idx| self.link_output.module_table[*idx].exec_order());
     entries_to_split.dedup();
