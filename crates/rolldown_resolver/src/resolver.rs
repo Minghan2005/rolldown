@@ -66,6 +66,12 @@ impl<Fs: FileSystem + Clone + 'static> Resolver<Fs> {
       package_json_cache: DashMap::default(),
     }
   }
+
+  /// Derive a resolver that shares this resolver's cache, so tsconfig
+  /// lookups and cache clearing stay consistent with module resolution.
+  pub fn derive_cache_sharing_resolver(&self) -> ResolverGeneric<Fs> {
+    self.default_resolver.clone_with_options(self.default_resolver.options().clone())
+  }
 }
 
 #[derive(Debug)]
