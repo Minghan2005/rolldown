@@ -57,63 +57,69 @@ assert.strictEqual(a.b.c, "c");
 
 # HMR Step 0
 
-## Meta
-
-- update type: full-reload
-- reason: no hmr boundary found for module `main.js`
-
-## Build Output
-
-### Assets
-
-#### main.js
+## Code
 
 ```js
-import assert from "node:assert";
-// HIDDEN [\0rolldown/runtime.js]
-__rolldown_runtime__.registerGraph({
-	ids: [
-		"c.js",
-		"b.js",
-		"a.js",
-		"main.js"
-	],
-	localCount: 4,
-	edges: [
-		[1],
-		[0],
-		[1],
-		[2]
-	],
-	dynamicEdges: [
-		[],
-		[],
-		[],
-		[]
-	]
-});
-//#region c.js
-var c_exports = /* @__PURE__ */ __exportAll({ c: () => "cc" });
-__rolldown_runtime__.createModuleHotContext("c.js");
-__rolldown_runtime__.registerModule("c.js", { exports: c_exports });
+__rolldown_runtime__.registerGraph({ids:["a.js","b.js","c.js","main.js"],localCount:4,edges:[[1],[2],[1],[0]],dynamicEdges:[[],[],[],[]]});
+//#region a.js
+__rolldown_runtime__.registerFactory("a.js", "esm", (function(__rolldown_module_id__) {
+	try {
+		var __rolldown_exports__ = __rolldown_runtime__.__exportAll({ a: () => a });
+		__rolldown_runtime__.registerModule(__rolldown_module_id__, { exports: __rolldown_exports__ });
+		__rolldown_runtime__.initModule("b.js");
+		const hot_a = __rolldown_runtime__.createModuleHotContext(__rolldown_module_id__);
+		var import_b_00 = __rolldown_runtime__.loadExports("b.js");
+		const a = { b: import_b_00.b };
+	} finally {}
+}));
+
 //#endregion
 //#region b.js
-var b_exports = /* @__PURE__ */ __exportAll({ b: () => b });
-__rolldown_runtime__.createModuleHotContext("b.js");
-__rolldown_runtime__.registerModule("b.js", { exports: b_exports });
-const b = { c: "cc" };
+__rolldown_runtime__.registerFactory("b.js", "esm", (function(__rolldown_module_id__) {
+	try {
+		var __rolldown_exports__ = __rolldown_runtime__.__exportAll({ b: () => b });
+		__rolldown_runtime__.registerModule(__rolldown_module_id__, { exports: __rolldown_exports__ });
+		__rolldown_runtime__.initModule("c.js");
+		const hot_b = __rolldown_runtime__.createModuleHotContext(__rolldown_module_id__);
+		var import_c_10 = __rolldown_runtime__.loadExports("c.js");
+		const b = { c: import_c_10.c };
+	} finally {}
+}));
+
 //#endregion
-//#region a.js
-var a_exports = /* @__PURE__ */ __exportAll({ a: () => a });
-__rolldown_runtime__.createModuleHotContext("a.js");
-__rolldown_runtime__.registerModule("a.js", { exports: a_exports });
-const a = { b };
+//#region c.js
+__rolldown_runtime__.registerFactory("c.js", "esm", (function(__rolldown_module_id__) {
+	try {
+		var __rolldown_exports__ = __rolldown_runtime__.__exportAll({ c: () => c });
+		__rolldown_runtime__.registerModule(__rolldown_module_id__, { exports: __rolldown_exports__ });
+		__rolldown_runtime__.initModule("b.js");
+		const hot_c = __rolldown_runtime__.createModuleHotContext(__rolldown_module_id__);
+		var import_b_20 = __rolldown_runtime__.loadExports("b.js");
+		const c = "cc";
+	} finally {}
+}));
+
 //#endregion
 //#region main.js
-var main_exports = /* @__PURE__ */ __exportAll({});
-__rolldown_runtime__.createModuleHotContext("main.js");
-__rolldown_runtime__.registerModule("main.js", { exports: main_exports });
-assert.strictEqual(a.b.c, "c");
-//#endregion
+import * as import_node_assert_30 from "node:assert";
+__rolldown_runtime__.registerFactory("main.js", "esm", (function(__rolldown_module_id__) {
+	try {
+		var __rolldown_exports__ = __rolldown_runtime__.__exportAll({});
+		__rolldown_runtime__.registerModule(__rolldown_module_id__, { exports: __rolldown_exports__ });
+		__rolldown_runtime__.initModule("a.js");
+		const hot_main = __rolldown_runtime__.createModuleHotContext(__rolldown_module_id__);
+		var import_a_31 = __rolldown_runtime__.loadExports("a.js");
+		import_node_assert_30.default.strictEqual(import_a_31.a.b.c, "c");
+	} finally {}
+}));
 
+//#endregion
 ```
+
+## Meta
+
+- update type: patch
+
+### Changed Ids
+
+- c.js

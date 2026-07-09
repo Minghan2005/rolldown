@@ -2269,7 +2269,6 @@ export type BindingHmrUpdate =
    */
   changedIds: Array<string>, /** Per-client envelope sequence number. */
 seq: number }
-| { type: 'FullReload', reason?: string }
 | { type: 'Noop' }
 
 export interface BindingHookFilter {
@@ -2689,8 +2688,7 @@ export declare enum BindingPropertyWriteSideEffects {
 
 export declare enum BindingRebuildStrategy {
   Always = 0,
-  Auto = 1,
-  Never = 2
+  Never = 1
 }
 
 export interface BindingReplacePluginConfig {

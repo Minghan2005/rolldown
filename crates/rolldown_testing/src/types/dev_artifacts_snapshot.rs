@@ -145,7 +145,6 @@ impl DevArtifactsSnapshot {
       "- update type: {}",
       match hmr_update {
         HmrUpdate::Patch(_) => "patch",
-        HmrUpdate::FullReload { .. } => "full-reload",
         HmrUpdate::Noop => "noop",
       }
     ));
@@ -163,10 +162,6 @@ impl DevArtifactsSnapshot {
           .collect::<Vec<_>>();
         changed_ids.add_content(&meta.join("\n"));
         meta_section.add_child(changed_ids);
-      }
-      HmrUpdate::FullReload { reason } => {
-        let reason = reason.replace(cwd_str, "$CWD");
-        meta_section.add_content(&format!("\n- reason: {reason}"));
       }
       HmrUpdate::Noop => {}
     }

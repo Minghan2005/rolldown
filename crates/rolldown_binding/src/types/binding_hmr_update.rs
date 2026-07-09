@@ -14,9 +14,6 @@ pub enum BindingHmrUpdate {
     /// Per-client envelope sequence number.
     seq: u32,
   },
-  FullReload {
-    reason: Option<String>,
-  },
   Noop,
 }
 
@@ -33,9 +30,6 @@ impl From<rolldown_common::HmrUpdate> for BindingHmrUpdate {
         changed_ids: patch.changed_ids,
         seq: patch.seq,
       },
-      rolldown_common::HmrUpdate::FullReload { reason } => {
-        Self::FullReload { reason: Some(reason) }
-      }
       rolldown_common::HmrUpdate::Noop => Self::Noop,
     }
   }
