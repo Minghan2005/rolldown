@@ -13,6 +13,9 @@
           "test": "second|\\0rolldown/runtime\\.js"
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   }
 }

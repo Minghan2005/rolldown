@@ -3,7 +3,8 @@
   "config": {
     "strictExecutionOrder": true,
     "experimental": {
-      "lazyBarrel": true
+      "lazyBarrel": true,
+      "onDemandWrapping": true
     }
   },
   "configVariants": []

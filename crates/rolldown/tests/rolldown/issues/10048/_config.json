@@ -10,7 +10,8 @@
     "format": "esm",
     "strictExecutionOrder": true,
     "experimental": {
-      "lazyBarrel": true
+      "lazyBarrel": true,
+      "onDemandWrapping": true
     }
   }
 }

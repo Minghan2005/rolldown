@@ -63,6 +63,12 @@ async fn bundle_fixture_with_options(
   mut options: BundlerOptions,
 ) -> BTreeMap<String, String> {
   options.format.get_or_insert(OutputFormat::Esm);
+  if strict_execution_order {
+    // These invariants pin the on-demand mode unless a test opts into wrap-all explicitly.
+    let mut experimental = options.experimental.take().unwrap_or_default();
+    experimental.on_demand_wrapping.get_or_insert(true);
+    options.experimental = Some(experimental);
+  }
   let mut bundler = Bundler::new(BundlerOptions {
     input: Some(inputs),
     cwd: Some(fixture_dir.into()),
@@ -167,6 +173,30 @@ async fn strict_execution_order_does_not_change_hazard_free_output() {
   let strict_output = bundle(true).await;
 
   assert_eq!(strict_output, default_output);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrap_all_mode_wraps_even_hazard_free_output() {
+  let flag_off = bundle(false).await;
+  let wrap_all = bundle_fixture_with_options(
+    FIXTURE_ROOT,
+    vec![InputItem { name: Some("main".to_string()), import: "./main.js".to_string() }],
+    true,
+    BundlerOptions {
+      experimental: Some(rolldown_common::ExperimentalOptions {
+        on_demand_wrapping: Some(false),
+        ..Default::default()
+      }),
+      ..Default::default()
+    },
+  )
+  .await;
+
+  assert_ne!(flag_off, wrap_all, "default strict mode must wrap regardless of hazards");
+  assert!(
+    wrap_all.values().any(|code| code.contains("init_")),
+    "wrap-all output should contain order wrappers",
+  );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -370,6 +400,10 @@ async fn late_order_wrapping_revalidates_output_file() {
     file: Some("bundle.js".to_string()),
     format: Some(OutputFormat::Esm),
     strict_execution_order: Some(true),
+    experimental: Some(rolldown_common::ExperimentalOptions {
+      on_demand_wrapping: Some(true),
+      ..Default::default()
+    }),
     ..Default::default()
   })
   .expect("failed to create bundler");

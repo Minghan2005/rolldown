@@ -17,7 +17,7 @@ export { value as normalLibValue, value$1 as tlaLibValue };
 
 ```
 
-# Variant: [strict_execution_order: true]
+# Variant: [on_demand_wrapping: true] [strict_execution_order: true]
 
 ## Assets
 

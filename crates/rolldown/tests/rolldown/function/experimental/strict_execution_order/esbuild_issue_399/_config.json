@@ -14,7 +14,8 @@
   "configVariants": [
     {
       "_configName": "strict",
-      "strictExecutionOrder": true
+      "strictExecutionOrder": true,
+      "onDemandWrapping": true
     }
   ],
   "expectExecuted": false

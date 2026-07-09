@@ -3,7 +3,8 @@
     "external": ["node:assert"],
     "strictExecutionOrder": true,
     "experimental": {
-      "devMode": {}
+      "devMode": {},
+      "onDemandWrapping": true
     }
   }
 }

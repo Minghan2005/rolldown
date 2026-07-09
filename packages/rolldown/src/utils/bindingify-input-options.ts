@@ -174,6 +174,7 @@ function bindingifyExperimental(
     attachDebugInfo: bindingifyAttachDebugInfo(experimental?.attachDebugInfo),
     chunkModulesOrder,
     chunkImportMap: experimental?.chunkImportMap,
+    onDemandWrapping: experimental?.onDemandWrapping,
     incrementalBuild: experimental?.incrementalBuild,
     nativeMagicString: experimental?.nativeMagicString,
     chunkOptimization: experimental?.chunkOptimization,

@@ -69,6 +69,13 @@ impl GenerateStage<'_> {
       return None;
     }
 
+    // Wrap-all is the default strict mode: every eligible module defers, so the eager phase is
+    // inert and no evaluation-order prediction is needed. The on-demand analysis below is the
+    // opt-in minimality mode behind `experimental.onDemandWrapping`.
+    if !self.options.experimental.is_on_demand_wrapping_enabled() {
+      return Some(self.wrap_all_order_analysis(chunk_graph));
+    }
+
     let import_edges = self.predicted_static_import_edges(chunk_graph, used_symbol_refs);
     let mut all_at_risk = FxHashSet::default();
     let mut roots = Vec::new();
@@ -97,6 +104,24 @@ impl GenerateStage<'_> {
 
     let plan = self.build_order_wrap_plan(all_at_risk, &roots, chunk_graph, &import_edges);
     Some(OrderAnalysis { plan, import_edges })
+  }
+
+  fn wrap_all_order_analysis(&self, chunk_graph: &ChunkGraph) -> OrderAnalysis {
+    let mut plan = OrderWrapPlan::default();
+    for &root in self.link_output.entries.keys() {
+      if !self.link_output.metas[root].is_included {
+        continue;
+      }
+      for module_idx in self.expected_order_for_root(root) {
+        if self.is_order_wrap_eligible(module_idx) {
+          plan.insert(module_idx);
+        }
+      }
+    }
+    OrderAnalysis {
+      plan,
+      import_edges: index_vec![FxHashSet::default(); chunk_graph.chunk_table.len()],
+    }
   }
 
   fn expected_order_for_root(&self, root: ModuleIdx) -> Vec<ModuleIdx> {

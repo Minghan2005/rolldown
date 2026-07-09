@@ -1,6 +1,11 @@
 {
   "config": {
-    "input": [{ "name": "main", "import": "./main.js" }],
+    "input": [
+      {
+        "name": "main",
+        "import": "./main.js"
+      }
+    ],
     "strictExecutionOrder": true,
     "codeSplitting": {
       "groups": [
@@ -10,6 +15,9 @@
           "includeDependenciesRecursively": false
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   }
 }

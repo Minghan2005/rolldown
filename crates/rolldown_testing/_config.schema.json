@@ -1012,6 +1012,12 @@
             }
           ]
         },
+        "onDemandWrapping": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "nativeMagicString": {
           "type": [
             "boolean",
@@ -1870,6 +1876,12 @@
           ]
         },
         "minifyInternalExports": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "onDemandWrapping": {
           "type": [
             "boolean",
             "null"

@@ -9,6 +9,9 @@
           "test": "reader\\.js"
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   }
 }

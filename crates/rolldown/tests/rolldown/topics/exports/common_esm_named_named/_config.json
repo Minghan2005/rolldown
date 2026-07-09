@@ -9,6 +9,9 @@
           "test": "shared"
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   },
   "_comment": "Tests Common chunk + Esm WrapKind + Named OutputExports + named export access"

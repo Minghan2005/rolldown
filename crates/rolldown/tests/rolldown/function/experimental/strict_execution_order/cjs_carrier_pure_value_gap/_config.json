@@ -1,13 +1,31 @@
 {
   "config": {
     "input": [
-      { "name": "main", "import": "./main.js" },
-      { "name": "second", "import": "./second.js" },
-      { "name": "cjs", "import": "./node_modules/pure-cjs/index.cjs" },
-      { "name": "carrier", "import": "./node_modules/pure-carrier/index.js" },
-      { "name": "unused", "import": "./unused.js" }
+      {
+        "name": "main",
+        "import": "./main.js"
+      },
+      {
+        "name": "second",
+        "import": "./second.js"
+      },
+      {
+        "name": "cjs",
+        "import": "./node_modules/pure-cjs/index.cjs"
+      },
+      {
+        "name": "carrier",
+        "import": "./node_modules/pure-carrier/index.js"
+      },
+      {
+        "name": "unused",
+        "import": "./unused.js"
+      }
     ],
-    "strictExecutionOrder": true
+    "strictExecutionOrder": true,
+    "experimental": {
+      "onDemandWrapping": true
+    }
   },
   "hiddenRuntimeModule": false
 }

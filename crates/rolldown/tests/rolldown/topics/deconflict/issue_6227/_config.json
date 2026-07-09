@@ -6,6 +6,9 @@
         "import": "./main.js"
       }
     ],
-    "strictExecutionOrder": true
+    "strictExecutionOrder": true,
+    "experimental": {
+      "onDemandWrapping": true
+    }
   }
 }

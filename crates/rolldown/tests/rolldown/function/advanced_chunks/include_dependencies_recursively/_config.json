@@ -8,6 +8,9 @@
           "name": "vendor"
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   }
 }

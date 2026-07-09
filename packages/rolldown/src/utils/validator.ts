@@ -656,6 +656,7 @@ const InputOptionsSchema = v.strictObject({
           }),
         ]),
       ),
+      onDemandWrapping: v.optional(v.boolean()),
       incrementalBuild: v.optional(v.boolean()),
       nativeMagicString: v.optional(v.boolean()),
       chunkOptimization: v.optional(
@@ -991,7 +992,7 @@ const OutputOptionsSchema = v.strictObject({
   ),
   strictExecutionOrder: v.pipe(
     v.optional(v.boolean()),
-    v.description('Preserve source module execution order across generated chunks.'),
+    v.description('Lets modules be executed in the order they are declared.'),
   ),
   strict: v.pipe(
     v.optional(v.union([v.boolean(), v.literal('auto')])),

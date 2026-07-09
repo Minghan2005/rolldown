@@ -1,8 +1,14 @@
 {
   "config": {
     "input": [
-      { "name": "a", "import": "./a.cjs" },
-      { "name": "b", "import": "./b.cjs" }
+      {
+        "name": "a",
+        "import": "./a.cjs"
+      },
+      {
+        "name": "b",
+        "import": "./b.cjs"
+      }
     ],
     "strictExecutionOrder": true,
     "codeSplitting": {
@@ -13,6 +19,9 @@
           "includeDependenciesRecursively": false
         }
       ]
+    },
+    "experimental": {
+      "onDemandWrapping": true
     }
   }
 }

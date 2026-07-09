@@ -1,6 +1,9 @@
 {
   "config": {
     "strictExecutionOrder": true,
-    "minify": false
+    "minify": false,
+    "experimental": {
+      "onDemandWrapping": true
+    }
   }
 }

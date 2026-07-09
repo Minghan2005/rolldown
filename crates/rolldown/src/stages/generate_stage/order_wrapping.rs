@@ -145,6 +145,8 @@ impl GenerateStage<'_> {
     }
 
     // Move an interop entry trigger to a facade when another chunk imports its implementation.
+    // Wrap-all mode computes no prediction and splits unconditionally.
+    let on_demand = self.options.experimental.is_on_demand_wrapping_enabled();
     let mut imported_chunks = FxHashSet::default();
     for (chunk_idx, importee_chunks) in analysis.import_edges.iter_enumerated() {
       imported_chunks
@@ -152,10 +154,11 @@ impl GenerateStage<'_> {
     }
     entries_to_split.extend(self.link_output.entries.keys().copied().filter(|entry_module_idx| {
       !matches!(self.link_output.metas[*entry_module_idx].wrap_kind(), WrapKind::None)
-        && chunk_graph
-          .entry_module_to_entry_chunk
-          .get(entry_module_idx)
-          .is_some_and(|entry_chunk_idx| imported_chunks.contains(entry_chunk_idx))
+        && (!on_demand
+          || chunk_graph
+            .entry_module_to_entry_chunk
+            .get(entry_module_idx)
+            .is_some_and(|entry_chunk_idx| imported_chunks.contains(entry_chunk_idx)))
     }));
     entries_to_split.sort_unstable_by_key(|idx| self.link_output.module_table[*idx].exec_order());
     entries_to_split.dedup();

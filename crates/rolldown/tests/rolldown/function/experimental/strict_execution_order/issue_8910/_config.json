@@ -8,6 +8,9 @@
     ],
     "external": ["node:assert"],
     "strictExecutionOrder": true,
-    "preserveEntrySignatures": "false"
+    "preserveEntrySignatures": "false",
+    "experimental": {
+      "onDemandWrapping": true
+    }
   }
 }

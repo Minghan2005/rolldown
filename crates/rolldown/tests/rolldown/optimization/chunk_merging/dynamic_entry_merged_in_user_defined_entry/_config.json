@@ -6,7 +6,10 @@
         "import": "entry.js"
       }
     ],
-    "strictExecutionOrder": true
+    "strictExecutionOrder": true,
+    "experimental": {
+      "onDemandWrapping": true
+    }
   },
   "configVariants": [
     {
