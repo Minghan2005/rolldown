@@ -17,6 +17,68 @@ The order decision can only be made after provisional chunk placement. Reusing `
 - Flag-off builds do not allocate order-wrapper state or create strict-only facades.
 - The external differential fuzzer remains the semantic verifier. Rolldown does not add a test-only execution model or assertions that merely turn lowering bugs into build failures.
 
+## Modes
+
+`strictExecutionOrder: true` alone runs **wrap-all**: every eligible module defers, the eager
+phase contains only inert definitions, and no evaluation-order prediction is needed —
+correctness rests solely on the shared lowering and trigger placement. It is the default
+because its trust base is the smaller one, and it serves as the escape hatch when the
+selective analysis misjudges a shape.
+
+`experimental.onDemandWrapping: true` opts into the **on-demand** analysis described below,
+which wraps only modules whose predicted evaluation order deviates from source order. Both
+modes share the plan/lowering/consumer pipeline; they differ only in how the plan is seeded.
+
+## Conservative decisions
+
+Each of these trades bytes for certainty; they are the complete list of places strict output
+deliberately exceeds the minimal wrap set:
+
+- **Wrap-all mode** wraps everything eligible (see Modes).
+- **Chunk-cycle bailout** (on-demand): a root that can reach a static chunk cycle over the
+  predicted edges additionally wraps every eligible module in its expected order. Within a
+  cycle, evaluation order depends on the chunk the runtime enters first, and lowering itself
+  moves that entry point; the prediction also cannot see `var`-form interop wrapper
+  definitions that another cycle chunk calls eagerly.
+- **Entry-trigger facades**: an inline entry trigger fires whenever its chunk is evaluated,
+  so an interop-wrapped entry whose chunk another chunk imports moves its trigger to a
+  facade (unconditionally in wrap-all mode, which has no predicted edges).
+- **CJS namespace merge is skipped under strict** (`determine_safely_merge_cjs_ns`): merging
+  moves the surviving require call to whichever statement stays included — an intra-body
+  move no wrapping can repair. Per-importer call sites cost bytes; the wrapper memoizes.
+- **`expected ∖ actual` seeds**: an order-sensitive module invisible to the predicted order
+  (tree-shaking considers it side-effect-free) is wrapped rather than trusted.
+
+## Trigger placement
+
+Every site that can run a wrapped module, in one place:
+
+| Trigger                                                      | Lives in                                    | Owner                                                                          |
+| ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------ |
+| `init_*()` for an order-wrapped importee of a live statement | importer body, statement position           | finalizer via the shared init-target view                                      |
+| `init_*()` / `require_*()` obligations of removed statements | importer body, removed statement's position | `OrderImportOverlay` / transitive init targets                                 |
+| user or dynamic entry activation                             | entry facade prologue                       | `create_order_wrap_entry_facades` / `restore_order_wrap_dynamic_entry_facades` |
+| interop `require_*()` of an eager importer                   | importer body (its carrier)                 | flag-off interop machinery, order-analysis carrier rule                        |
+
+A trigger must never sit inline in a chunk body that other chunks can evaluate as a
+dependency; that is the facade rule's content.
+
+## Audit decisions
+
+Two shapes were challenged and deliberately kept:
+
+- **The prediction runs the real cross-chunk link pass twice** (on-demand only). An
+  edges-only fork and a cached-state reuse were both designed and rejected: the init
+  metadata pass writes between prediction and the final link run, so any shortcut drifts
+  from emission — the very failure the prediction exists to prevent. The double run is the
+  fidelity mechanism; wrap-all mode skips prediction entirely.
+- **Interop-wrapped modules appear inside the expected/actual orders** rather than being
+  collapsed to carrier attributions. An attribution-identity model was implemented and
+  reverted: two different carriers can fire a trigger at the same sequence position (host
+  identity differs, order does not), so identity comparison over-wraps. The in-order
+  representation is the sequence semantics; the trigger-host transfer is its minimal
+  repair for at-risk modules that cannot themselves be delayed.
+
 ## Non-Goals
 
 - Stronger top-level-await semantics than the default build.

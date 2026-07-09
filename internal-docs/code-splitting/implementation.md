@@ -89,7 +89,7 @@ ChunkGraph
 - `crates/rolldown_utils/src/bitset.rs` — compact reachability representation
 - `crates/rolldown/src/types/linking_metadata.rs` — immutable link-stage `wrap_kind()`
 
-`finalize_chunk_plan` may run two metadata passes. Namespace usage and entry-level external re-exports are first finalized on the provisional graph. They are recomputed when order wrapping or strict entry facades change topology.
+Wrap-all (the default strict mode) seeds the plan from the expected orders alone and skips prediction; `experimental.onDemandWrapping` enables the selective analysis. `finalize_chunk_plan` may run two metadata passes. Namespace usage and entry-level external re-exports are first finalized on the provisional graph. They are recomputed when order wrapping or strict entry facades change topology.
 
 Order planning closes over sensitive suffixes, dependent importers/readers, and eligible sensitive modules in any static chunk SCC already touched by the plan.
 
