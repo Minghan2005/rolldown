@@ -117,6 +117,10 @@ async fn bundle_emitted_target(
       entry_filenames: Some("[name].js".to_string().into()),
       chunk_filenames: Some("chunks/[name].js".to_string().into()),
       strict_execution_order: Some(true),
+      experimental: Some(rolldown_common::ExperimentalOptions {
+        on_demand_wrapping: Some(true),
+        ..Default::default()
+      }),
       code_splitting: Some(CodeSplittingMode::Advanced(ManualCodeSplittingOptions {
         groups: Some(vec![MatchGroup {
           name: MatchGroupName::Static("group".to_string()),

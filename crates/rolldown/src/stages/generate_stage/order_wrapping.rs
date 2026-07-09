@@ -3,9 +3,9 @@ use crate::{
 };
 use itertools::Itertools;
 use rolldown_common::{
-  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ImportRecordIdx, ImportRecordMeta, IndexModules,
-  ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper, StmtInfoIdx, SymbolRef, SymbolRefDb,
-  UsedSymbolRefsBuilder, WrapKind,
+  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ImportKind, ImportRecordIdx, ImportRecordMeta,
+  IndexModules, ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper, StmtInfoIdx, SymbolRef,
+  SymbolRefDb, UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
