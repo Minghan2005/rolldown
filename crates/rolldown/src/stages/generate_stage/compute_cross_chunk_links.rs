@@ -182,10 +182,7 @@ impl GenerateStage<'_> {
     }
   }
 
-  /// Runs the real cross-chunk link computation on the provisional graph. It assigns
-  /// `symbol.chunk_idx` as a side effect; that stays valid because lowering keeps every user
-  /// module's chunk index and the one relocated module (the runtime) is cleared explicitly in
-  /// `ensure_runtime_module_for_order_wraps`. The final link run overwrites all of it.
+  /// Compute provisional links for order analysis. Runtime symbol placement is cleared if moved.
   pub(super) fn predicted_static_import_edges(
     &mut self,
     chunk_graph: &ChunkGraph,
