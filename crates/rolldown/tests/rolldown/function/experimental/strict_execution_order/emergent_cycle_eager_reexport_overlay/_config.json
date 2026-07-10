@@ -2,6 +2,7 @@
   "config": {
     "input": [{ "name": "main", "import": "./main.js" }],
     "strictExecutionOrder": true,
+    "preserveEntrySignatures": "allow-extension",
     "experimental": { "onDemandWrapping": true },
     "codeSplitting": {
       "includeDependenciesRecursively": false,

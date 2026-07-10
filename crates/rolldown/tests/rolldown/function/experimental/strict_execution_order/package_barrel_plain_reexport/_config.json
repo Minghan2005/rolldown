@@ -1,6 +1,7 @@
 {
   "config": {
     "strictExecutionOrder": true,
+    "preserveEntrySignatures": "allow-extension",
     "codeSplitting": {
       "includeDependenciesRecursively": false,
       "groups": [

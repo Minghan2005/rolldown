@@ -1,21 +1,6 @@
 ---
 source: crates/rolldown_testing/src/integration_test.rs
 ---
-# warnings
-
-## INVALID_OPTION
-
-```text
-[INVALID_OPTION] `preserveEntrySignatures: 'allow-extension'` is set implicitly by Rolldown
-
-- `codeSplitting.includeDependenciesRecursively = false` requires `preserveEntrySignatures` to be either `false` or 'allow-extension'
-
-To fix:
-
-- Set `preserveEntrySignatures` either to `false` or 'allow-extension' in your config
-
-```
-
 # Assets
 
 ## h.js
@@ -133,21 +118,6 @@ export { init_s_first as i, init_barrel as n, require_carrier_cjs as r, bmark as
 ```
 
 # Variant: wrap-all: [on_demand_wrapping: false]
-
-## warnings
-
-### INVALID_OPTION
-
-```text
-[INVALID_OPTION] `preserveEntrySignatures: 'allow-extension'` is set implicitly by Rolldown
-
-- `codeSplitting.includeDependenciesRecursively = false` requires `preserveEntrySignatures` to be either `false` or 'allow-extension'
-
-To fix:
-
-- Set `preserveEntrySignatures` either to `false` or 'allow-extension' in your config
-
-```
 
 ## Assets
 

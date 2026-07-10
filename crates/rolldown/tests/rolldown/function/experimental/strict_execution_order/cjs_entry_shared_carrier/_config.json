@@ -11,6 +11,7 @@
       }
     ],
     "strictExecutionOrder": true,
+    "preserveEntrySignatures": "allow-extension",
     "codeSplitting": {
       "groups": [
         {
