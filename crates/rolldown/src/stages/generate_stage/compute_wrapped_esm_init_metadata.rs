@@ -187,24 +187,20 @@ fn transitive_esm_init_targets(
       let is_reexport =
         rec.meta.intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly);
       let Some(root) = rec.resolved_module else { continue };
-      let was_live_order_wrap_import = ctx.order_wrap && ctx.execution_dependencies.contains(&root);
       let overlay = ctx.order_state.import_overlay(OrderImportKey {
         importer: module.idx,
         statement: stmt_idx,
         record: rec_idx,
       });
       if ctx.order_wrap {
-        let retained_reexport = is_reexport && overlay.is_some();
-        // An init-owning barrel forwards its own re-export hops. A re-export record that is not
-        // suppressed as a walk-through interior record ("nested") owns its hop, so the barrel's
-        // `init_*` must forward through it — even when the direct re-export target is side-effect
-        // free (so not a live execution dependency) and no per-symbol overlay was created because
-        // the re-exported bindings are consumed only via the barrel namespace object or resolve
-        // through a deeper level. The traversal below only forwards to wrapped, live targets, so a
-        // genuinely unused pure re-export still forwards to nothing and stays droppable.
-        let owns_reexport_hop =
-          is_reexport && !ctx.order_state.is_nested_reexport_record(module.idx, rec_idx);
-        if !was_live_order_wrap_import && !retained_reexport && !owns_reexport_hop {
+        if !order_wrap_record_forwards(
+          ctx.order_state,
+          ctx.execution_dependencies,
+          module.idx,
+          rec_idx,
+          root,
+          is_reexport,
+        ) {
           continue;
         }
         if stmt_is_included
@@ -249,6 +245,38 @@ fn transitive_esm_init_targets(
     }
   }
   targets_by_stmt
+}
+
+/// Whether an order-wrapped importer's `init_*` must forward through this static-import record.
+///
+/// It forwards on either of two conditions:
+/// - **execution dependency** — the record's target is a live execution dependency of the importer
+///   (a side-effecting module the importer evaluates); or
+/// - **owns a re-export hop** — the record is a re-export the importer is not merely a walk-through
+///   interior for (`is_nested_reexport_record` is false). An init-owning barrel forwards its own
+///   re-export hops even when the direct target is side-effect free (so not a live execution
+///   dependency) and no per-symbol overlay was created because the bindings are consumed only via
+///   the barrel namespace object or resolve through a deeper level. The traversal only forwards to
+///   wrapped, live targets, so a genuinely unused pure re-export still forwards to nothing and stays
+///   droppable.
+///
+/// A third disjunct — "has an order-import overlay" — was previously ORed in but is redundant: every
+/// re-export record that carries an overlay is either non-nested (so already covered by the
+/// re-export-hop condition) or reaches the plan through a retained path minted only for non-nested
+/// records, and a non-re-export record only carries an overlay when its target is a live execution
+/// dependency. Dropping it leaves the forwarded-target set byte-identical.
+fn order_wrap_record_forwards(
+  order_state: &OrderWrapState,
+  execution_dependencies: &rolldown_utils::indexmap::FxIndexSet<ModuleIdx>,
+  importer_idx: ModuleIdx,
+  rec_idx: ImportRecordIdx,
+  root: ModuleIdx,
+  is_reexport: bool,
+) -> bool {
+  let was_execution_dependency = execution_dependencies.contains(&root);
+  let owns_reexport_hop =
+    is_reexport && !order_state.is_nested_reexport_record(importer_idx, rec_idx);
+  was_execution_dependency || owns_reexport_hop
 }
 
 fn collect_legacy_esm_init_targets(
