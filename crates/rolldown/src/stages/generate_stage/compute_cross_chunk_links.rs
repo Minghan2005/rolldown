@@ -627,8 +627,10 @@ impl GenerateStage<'_> {
       importer_meta: meta,
       modules: &self.link_output.module_table.modules,
       metas: &self.link_output.metas,
+      stmt_infos: &self.link_output.stmt_infos,
       symbol_db: &self.link_output.symbol_db,
       order_wrap_state: order_state,
+      strict_execution_order: self.options.is_strict_execution_order_enabled(),
     };
     for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[module_idx].iter_enumerated() {
       if !meta.stmt_info_included.has_bit(stmt_info_idx) {
