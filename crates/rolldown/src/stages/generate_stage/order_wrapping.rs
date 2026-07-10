@@ -151,8 +151,9 @@ impl GenerateStage<'_> {
     }
 
     // Move an interop entry trigger to a facade when another chunk imports its implementation.
-    // Wrap-all mode computes no prediction and splits unconditionally.
-    let on_demand = self.options.experimental.is_on_demand_wrapping_enabled();
+    // Wrap-all mode computes no prediction and splits unconditionally. The wrapping policy is
+    // carried on the analysis (decided once in `analyze_execution_order`) rather than re-read here.
+    let on_demand = analysis.on_demand;
     let mut imported_chunks = FxHashSet::default();
     for (chunk_idx, importee_chunks) in analysis.import_edges.iter_enumerated() {
       imported_chunks

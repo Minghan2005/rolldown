@@ -44,6 +44,11 @@ fn order_debug_trace(message: impl FnOnce() -> String) {
 pub(super) struct OrderAnalysis {
   pub(super) plan: OrderWrapPlan,
   pub(super) import_edges: IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+  /// Whether this analysis was produced by the on-demand minimality mode (as opposed to wrap-all).
+  /// Lowering reads it to decide whether entry-facade splitting is conditional (on-demand) or
+  /// unconditional (wrap-all) instead of re-reading the `experimental.onDemandWrapping` option, so
+  /// the wrapping policy lives in exactly one place — the analysis that already branched on it.
+  pub(super) on_demand: bool,
 }
 
 #[derive(Debug, Default)]
@@ -209,7 +214,7 @@ impl GenerateStage<'_> {
       planned_modules = plan.len(),
       "emergent-cycle fixpoint converged"
     );
-    Some(OrderAnalysis { plan, import_edges })
+    Some(OrderAnalysis { plan, import_edges, on_demand: true })
   }
 
   /// Project the chunk-level static import edges the lowering of `plan` will produce, as the
@@ -579,6 +584,7 @@ impl GenerateStage<'_> {
     OrderAnalysis {
       plan,
       import_edges: index_vec![FxHashSet::default(); chunk_graph.chunk_table.len()],
+      on_demand: false,
     }
   }
 
