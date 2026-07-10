@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use itertools::Itertools;
 use oxc_index::{IndexVec, index_vec};
 use petgraph::prelude::DiGraphMap;
@@ -13,6 +15,24 @@ use crate::module_finalizers::{
 };
 
 use super::GenerateStage;
+
+/// `ROLLDOWN_ORDER_DEBUG=1` turns on a stderr trace of the on-demand emergent-cycle fixpoint:
+/// the one-shot plan size, per-round emergent-cyclic-SCC shape and at-risk growth, and the final
+/// wrap delta over the one-shot plan. Off by default — the flag is read once into this
+/// `LazyLock`, so a disabled trace is a single relaxed atomic load outside the fixpoint's hot
+/// loop and costs nothing in normal builds. It makes otherwise-unverifiable claims (e.g.
+/// "vue-vben-admin: +141 wraps in 2 iterations") reproducible from build artifacts.
+static ORDER_DEBUG: LazyLock<bool> = LazyLock::new(|| {
+  std::env::var_os("ROLLDOWN_ORDER_DEBUG").is_some_and(|value| value != "0" && !value.is_empty())
+});
+
+/// Emit one `ROLLDOWN_ORDER_DEBUG` trace line. The message closure runs only when the flag is on,
+/// so building the (allocating) string is skipped entirely in normal builds.
+fn order_debug_trace(message: impl FnOnce() -> String) {
+  if *ORDER_DEBUG {
+    eprintln!("{}", message());
+  }
+}
 
 #[derive(Debug)]
 pub(super) struct OrderAnalysis {
@@ -126,6 +146,13 @@ impl GenerateStage<'_> {
     // emergent-cycle members, the at-risk set only grows, and it is finite — so this converges.
     let mut plan =
       self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
+    let one_shot_planned = plan.len();
+    order_debug_trace(|| {
+      format!(
+        "[order] one-shot plan: {one_shot_planned} modules ({} pre-lowering chunk cycles)",
+        chunk_cycles.sccs.len(),
+      )
+    });
     // The at-risk set is monotone and finite; this bound only guards against a logic error.
     let iteration_cap = self.link_output.module_table.modules.len() + 1;
     let mut iterations = 0usize;
@@ -138,23 +165,37 @@ impl GenerateStage<'_> {
       // Mark every eligible module hosted in an emergent cyclic chunk at-risk. Wrapping them all
       // (not only the order-sensitive ones) removes every eager body from those chunks, matching the
       // wrap-all shape that is provably safe under cyclic evaluation. `all_at_risk` only grows.
-      let mut grew = false;
+      let mut added = 0usize;
       for scc in &post_cycles.sccs {
         for &chunk_idx in scc {
           for &module_idx in &chunk_graph.chunk_table[chunk_idx].modules {
-            if self.is_order_wrap_eligible(module_idx) {
-              grew |= all_at_risk.insert(module_idx);
+            if self.is_order_wrap_eligible(module_idx) && all_at_risk.insert(module_idx) {
+              added += 1;
             }
           }
         }
       }
       iterations += 1;
-      if !grew {
+      order_debug_trace(|| {
+        format!(
+          "[order] fixpoint round {iterations}: {} emergent cyclic chunk SCC(s), +{added} at-risk (total {})",
+          post_cycles.sccs.len(),
+          all_at_risk.len(),
+        )
+      });
+      if added == 0 {
         break;
       }
       plan = self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
       assert!(iterations < iteration_cap, "order-wrap emergent-cycle fixpoint did not converge");
     }
+    order_debug_trace(|| {
+      format!(
+        "[order] fixpoint converged in {iterations} iteration(s): {} modules planned (+{} over the one-shot plan)",
+        plan.len(),
+        plan.len() - one_shot_planned,
+      )
+    });
     tracing::debug!(
       target: "order_analysis",
       iterations,
