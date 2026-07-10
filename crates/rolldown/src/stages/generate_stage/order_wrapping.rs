@@ -3,9 +3,9 @@ use crate::{
 };
 use itertools::Itertools;
 use rolldown_common::{
-  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ConcatenateWrappedModuleKind, ImportKind, ImportRecordIdx,
-  ImportRecordMeta, IndexModules, ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper,
-  StmtInfoIdx, SymbolRef, SymbolRefDb, UsedSymbolRefsBuilder, WrapKind,
+  Chunk, ChunkIdx, ChunkKind, ChunkMeta, ImportKind, ImportRecordIdx, ImportRecordMeta,
+  IndexModules, ModuleIdx, PostChunkOptimizationOperation, RuntimeHelper, StmtInfoIdx, SymbolRef,
+  SymbolRefDb, UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -668,14 +668,14 @@ pub(super) fn collect_frozen_reexport_usage(input: &OrderLoweringInput<'_>) -> F
 
 /// Whether `module_idx` carries its own ESM init wrapper — an interop `WrapKind::Esm` wrapper or an
 /// order wrapper selected by the plan — so an outer barrel's re-export traversal stops at it and
-/// delegates the remaining chain to its `init_*`. Concatenated-inner modules share the group's init
-/// rather than owning a standalone one, so they are excluded and remain walk-through.
+/// delegates the remaining chain to its `init_*`.
+///
+/// Concatenated wrapped modules — which would share their group's init rather than own a standalone
+/// one — are not supported on this branch (order wrapping never marks a module
+/// `ConcatenateWrappedModuleKind::Inner`/`Root`), so no concatenated-kind guard is needed here.
+/// Re-add one if concatenated-wrapper support lands.
 fn module_owns_reexport_init(input: &OrderLoweringInput<'_>, module_idx: ModuleIdx) -> bool {
-  matches!(
-    input.linking[module_idx].concatenated_wrapped_module_kind,
-    ConcatenateWrappedModuleKind::None
-  ) && (input.plan.contains(&module_idx)
-    || matches!(input.linking[module_idx].wrap_kind(), WrapKind::Esm))
+  input.plan.contains(&module_idx) || matches!(input.linking[module_idx].wrap_kind(), WrapKind::Esm)
 }
 
 fn retained_order_reexport_path(
