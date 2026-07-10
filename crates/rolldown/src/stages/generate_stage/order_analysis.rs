@@ -11,12 +11,12 @@ use rolldown_common::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::chunk_graph::ChunkGraph;
-use crate::module_finalizers::{
-  WrappedEsmInitTargetContext, collect_wrapped_esm_init_targets_for_import_record,
+use crate::esm_init_obligations::{
+  ObligationPurpose, WrappedEsmInitTargetContext, collect_order_wrap_esm_init_targets,
+  collect_wrapped_esm_init_targets_for_import_record, for_each_init_obligation_record,
 };
 
 use super::GenerateStage;
-use super::compute_wrapped_esm_init_metadata::collect_order_wrap_esm_init_targets;
 use super::order_wrap_state::EsmInitOrigin;
 
 /// `ROLLDOWN_ORDER_DEBUG=1` turns on a stderr trace of the on-demand emergent-cycle fixpoint:
@@ -427,21 +427,17 @@ impl GenerateStage<'_> {
       order_wrap_state: probe_state,
       strict_execution_order: true,
     };
-    for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[module.idx].iter_enumerated() {
-      let stmt_is_included = meta.stmt_info_included.has_bit(stmt_info_idx);
-      for &rec_idx in &stmt_info.import_records {
-        let rec = &module.import_records[rec_idx];
-        if rec.kind != ImportKind::Import {
-          continue;
-        }
-        // An included statement's targets are emitted at its own position; an *excluded* statement
-        // still forwards when it is a re-export hop the wrapped importer owns. Non-re-export
-        // excluded records forward nothing and are skipped.
-        if !stmt_is_included
-          && !rec.meta.intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
-        {
-          continue;
-        }
+    // Enumerate through the shared purpose-gated enumerator (Project contract: included
+    // statements plus excluded re-export hops — an included statement's targets are emitted at its
+    // own position, an *excluded* statement still forwards when it is a re-export hop the wrapped
+    // importer owns, and non-re-export excluded records forward nothing).
+    for_each_init_obligation_record(
+      ObligationPurpose::Project,
+      module,
+      meta,
+      &self.link_output.stmt_infos,
+      probe_state,
+      |rec_idx| {
         targets.extend(collect_wrapped_esm_init_targets_for_import_record(
           &ctx,
           rec_idx,
@@ -450,8 +446,8 @@ impl GenerateStage<'_> {
             chunk_graph.module_to_chunk[forwarding_module_idx] == Some(importer_chunk)
           },
         ));
-      }
-    }
+      },
+    );
   }
 
   /// Excluded non-included-forwarder projection — a wrapped importer's re-export of a *non-included*

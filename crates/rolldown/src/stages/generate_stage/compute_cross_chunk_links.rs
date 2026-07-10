@@ -1,7 +1,8 @@
 use super::GenerateStage;
 use crate::chunk_graph::ChunkGraph;
-use crate::module_finalizers::{
-  WrappedEsmInitTargetContext, collect_wrapped_esm_init_targets_for_import_record,
+use crate::esm_init_obligations::{
+  ObligationPurpose, WrappedEsmInitTargetContext,
+  collect_wrapped_esm_init_targets_for_import_record, for_each_init_obligation_record,
 };
 use crate::utils::chunk::conflict_resolver::{ConflictResolver, deconflict_order_key};
 use crate::utils::chunk::normalize_preserve_entry_signature;
@@ -667,20 +668,17 @@ impl GenerateStage<'_> {
       order_wrap_state: order_state,
       strict_execution_order: self.options.is_strict_execution_order_enabled(),
     };
-    for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[module_idx].iter_enumerated() {
-      if !meta.stmt_info_included.has_bit(stmt_info_idx) {
-        continue;
-      }
-      for &rec_idx in &stmt_info.import_records {
-        let rec = &module.import_records[rec_idx];
-        if rec.kind != ImportKind::Import {
-          continue;
-        }
-        if order_state.is_nested_reexport_record(module_idx, rec_idx) {
-          continue;
-        }
-        // Resolve the targets exactly as the finalizer will, but pretend every wrapper is reachable:
-        // we are registering precisely so it becomes reachable.
+    // Enumerate this importer's obligation records through the shared purpose-gated enumerator
+    // (Register contract: included statements, nested records skipped — emission's own gate), then
+    // resolve the targets exactly as the finalizer will, but pretend every wrapper is reachable:
+    // we are registering precisely so it becomes reachable.
+    for_each_init_obligation_record(
+      ObligationPurpose::Register,
+      module,
+      meta,
+      &self.link_output.stmt_infos,
+      order_state,
+      |rec_idx| {
         let targets = collect_wrapped_esm_init_targets_for_import_record(
           &ctx,
           rec_idx,
@@ -702,8 +700,8 @@ impl GenerateStage<'_> {
             depended_symbols.insert(target.wrapper_ref);
           }
         }
-      }
-    }
+      },
+    );
   }
 
   fn add_order_import_overlay_depended_symbols(

@@ -1,14 +1,140 @@
+//! The neutral home of every wrapped-ESM `init_*` **obligation** primitive — the one place that
+//! answers "which wrapped modules must this importer's record initialize, and does this record
+//! carry that obligation at all?".
+//!
+//! Three consumers enumerate the same module-level obligations for three purposes
+//! ([`ObligationPurpose`]), and historically each carried its own copy of the record gating and
+//! (before the emergent-cycle projection repair) its own route traversal, which let them drift
+//! apart — the C-class under-projection holes were exactly such drift. Everything they share now
+//! lives here:
+//!
+//! - **Emit** — the finalizer replaces each *included* static-import statement with the `init_*()`
+//!   calls of the targets that record must initialize
+//!   (`module_finalizers::transform_or_remove_import_export_stmt` and the `export *` path). It is
+//!   AST-visitor-driven, so it consults [`record_is_init_obligation`] per record at the statement
+//!   position (the statement is included by construction there) and resolves targets with
+//!   [`collect_wrapped_esm_init_targets_for_import_record`], demanding the wrapper be *reachable in
+//!   the emitting chunk*.
+//! - **Register** — `compute_cross_chunk_links` registers the `init_*` wrapper symbols a chunk must
+//!   import ahead of finalization. It drives [`for_each_init_obligation_record`] over the importer's
+//!   included statements and resolves targets with the same collector, treating every wrapper as
+//!   reachable (registration is what *makes* it reachable).
+//! - **Project** — the on-demand emergent-cycle fixpoint (`order_analysis`) predicts the chunk
+//!   edges a wrap plan's lowering will add, before anything is minted. It drives the same
+//!   enumerator/collector against a probe [`OrderWrapState`], extended to the excluded re-export
+//!   hops whose registration flows through the metadata pass rather than the included-record path.
+//!
+//! Excluded statements are the one structural asymmetry: for Emit and Register their targets are
+//! precomputed once by `compute_wrapped_esm_init_metadata` (post-convergence, stored as
+//! `transitive_init_targets`), while Project must recompute them per fixpoint round from the
+//! current plan — both through the shared excluded-hop router
+//! [`collect_order_wrap_esm_init_targets`], so the routing itself cannot drift.
+//!
+//! Purpose contracts are deliberately *not* identical, and each divergence is encoded (and
+//! justified) on [`ObligationPurpose`] rather than re-derived at call sites.
+
 use rolldown_common::{
-  ConcatenateWrappedModuleKind, ImportKind, ImportRecordIdx, ImportRecordMeta, IndexModules,
-  ModuleIdx, NormalModule, Specifier, SymbolRef, SymbolRefDb, WrapKind,
+  ChunkIdx, ExportsKind, ImportKind, ImportRecordIdx, ImportRecordMeta, IndexModules, Module,
+  ModuleIdx, NormalModule, ResolvedImportRecord, Specifier, SymbolRef, SymbolRefDb, WrapKind,
 };
 use rustc_hash::FxHashSet;
 
 use crate::{
+  chunk_graph::ChunkGraph,
   stages::generate_stage::order_wrap_state::{EsmInitOrigin, OrderWrapState},
   type_alias::IndexStmtInfos,
   types::linking_metadata::{LinkingMetadata, LinkingMetadataVec},
 };
+
+/// Why obligations are being enumerated. The variants select the *record-scope contract* — which
+/// statements and records count as obligations — so a consumer states its contract once instead of
+/// hand-rolling the gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObligationPurpose {
+  /// Finalizer emission at AST statement positions. Only *included* statements are visited (the
+  /// finalizer's excluded statements consume the precomputed transitive metadata instead), and a
+  /// nested re-export record emits nothing — a wrapped ancestor barrel walks through it and owns
+  /// that init itself.
+  Emit,
+  /// Cross-chunk `init_*` symbol registration. Same contract as [`ObligationPurpose::Emit`]:
+  /// included statements only, nested records skipped — registration and emission must stay in
+  /// lockstep or a registered-but-never-emitted wrapper import (or vice versa) appears.
+  Register,
+  /// Emergent-cycle edge projection. Included statements *plus* excluded re-export hops (their
+  /// real registration flows through the excluded-statement metadata, which does not exist yet at
+  /// projection time), and nested records are *kept*: projection may over-approximate — an extra
+  /// edge only ever wraps more, and wrapping more is always legal — but must never drop an edge
+  /// source, so it declines the nested-ownership refinement Emit/Register apply.
+  Project,
+}
+
+/// THE record gate: whether `rec` carries an init-forwarding obligation of the importer for this
+/// purpose. All three consumers consult this one predicate (Emit per record at its included
+/// statement position; Register/Project through [`for_each_init_obligation_record`]).
+pub fn record_is_init_obligation(
+  purpose: ObligationPurpose,
+  order_state: &OrderWrapState,
+  importer_idx: ModuleIdx,
+  rec: &ResolvedImportRecord,
+  rec_idx: ImportRecordIdx,
+  stmt_is_included: bool,
+) -> bool {
+  if rec.kind != ImportKind::Import {
+    return false;
+  }
+  match purpose {
+    ObligationPurpose::Emit | ObligationPurpose::Register => {
+      stmt_is_included && !order_state.is_nested_reexport_record(importer_idx, rec_idx)
+    }
+    ObligationPurpose::Project => {
+      stmt_is_included
+        || rec.meta.intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
+    }
+  }
+}
+
+/// Drive [`record_is_init_obligation`] over every statement of one importer, calling `f` for each
+/// obligation record. The statement-loop shape (including the namespace statement, whose record
+/// list is empty) is shared by Register and Projection so their iteration order — and therefore
+/// registration's insertion-ordered symbol set — cannot diverge.
+pub fn for_each_init_obligation_record(
+  purpose: ObligationPurpose,
+  importer: &NormalModule,
+  importer_meta: &LinkingMetadata,
+  stmt_infos: &IndexStmtInfos,
+  order_state: &OrderWrapState,
+  mut f: impl FnMut(ImportRecordIdx),
+) {
+  for (stmt_info_idx, stmt_info) in stmt_infos[importer.idx].iter_enumerated() {
+    let stmt_is_included = importer_meta.stmt_info_included.has_bit(stmt_info_idx);
+    for &rec_idx in &stmt_info.import_records {
+      if record_is_init_obligation(
+        purpose,
+        order_state,
+        importer.idx,
+        &importer.import_records[rec_idx],
+        rec_idx,
+        stmt_is_included,
+      ) {
+        f(rec_idx);
+      }
+    }
+  }
+}
+
+/// Whether a re-export record **owns its forwarding hop**: an init-owning barrel forwards through
+/// each of its re-export records unless the record is a nested walk-through interior a wrapped
+/// ancestor's traversal already owns. This is the ownership half of the excluded-statement
+/// forwarding predicate (`compute_wrapped_esm_init_metadata::order_wrap_record_forwards`) and the
+/// same nested-record fact [`record_is_init_obligation`] consults for Emit/Register.
+pub fn reexport_record_owns_hop(
+  order_state: &OrderWrapState,
+  importer_idx: ModuleIdx,
+  rec_idx: ImportRecordIdx,
+  is_reexport: bool,
+) -> bool {
+  is_reexport && !order_state.is_nested_reexport_record(importer_idx, rec_idx)
+}
 
 pub struct WrappedEsmInitTargetContext<'a> {
   pub importer: &'a NormalModule,
@@ -207,7 +333,10 @@ fn wrapped_esm_target_is_reachable(
     .esm_init_target(module_idx, meta)
     .is_some_and(|target| wrapper_is_reachable(target.wrapper_ref))
     && meta.is_included
-    && !matches!(meta.concatenated_wrapped_module_kind, ConcatenateWrappedModuleKind::Inner)
+    && !matches!(
+      meta.concatenated_wrapped_module_kind,
+      rolldown_common::ConcatenateWrappedModuleKind::Inner
+    )
 }
 
 /// Whether an included, unwrapped forwarder discharges *all* its downstream initialization through
@@ -283,18 +412,15 @@ fn forwarder_discharged_targets(
     order_wrap_state: ctx.order_wrap_state,
     strict_execution_order: ctx.strict_execution_order,
   };
-  for (stmt_idx, stmt_info) in
-    ctx.stmt_infos[forwarder_idx].iter_enumerated_without_namespace_stmt()
-  {
-    if !forwarder_meta.stmt_info_included.has_bit(stmt_idx) {
-      continue;
-    }
-    for &rec_idx in &stmt_info.import_records {
-      if forwarder.import_records[rec_idx].kind != ImportKind::Import
-        || ctx.order_wrap_state.is_nested_reexport_record(forwarder_idx, rec_idx)
-      {
-        continue;
-      }
+  // The forwarder's own emission contract is exactly Emit's: included statements, nested records
+  // silent — enumerate its discharging records through the same purpose-gated enumerator.
+  for_each_init_obligation_record(
+    ObligationPurpose::Emit,
+    forwarder,
+    forwarder_meta,
+    ctx.stmt_infos,
+    ctx.order_wrap_state,
+    |rec_idx| {
       discharged.extend(collect_esm_init_targets_for_record(
         &forwarder_ctx,
         rec_idx,
@@ -302,7 +428,76 @@ fn forwarder_discharged_targets(
         forwarding_module_owns_initialization,
         visited_forwarders,
       ));
+    },
+  );
+  discharged
+}
+
+/// Follow excluded re-exports through barrels to included wrapped importees — the excluded-hop
+/// router shared by the metadata pass (Emit/Register's precompute) and the fixpoint projector.
+///
+/// Called with `retained_reexport_path: None` on a *non-included* forwarder, it walks the
+/// forwarder's every static import to the wrapped modules they reach — the excluded-hop routing the
+/// real metadata pass performs, and the edge source the resolved-exports-only projection missed
+/// (Hole 2). The real pass can pass `Some(path)` even through a non-included forwarder (retained
+/// star paths are recorded pre-tree-shaking); the projector's `None` differs from that only at the
+/// same-chunk prune below, and every retained-path target is a resolved export of the importer that
+/// the projector already covers through its collector source — see
+/// `project_excluded_forwarder_edges`.
+#[expect(clippy::too_many_arguments)]
+pub fn collect_order_wrap_esm_init_targets(
+  modules: &IndexModules,
+  metas: &LinkingMetadataVec,
+  chunk_graph: &ChunkGraph,
+  order_state: &OrderWrapState,
+  importer_chunk_idx: ChunkIdx,
+  root: ModuleIdx,
+  retained_reexport_path: Option<&[(ModuleIdx, ImportRecordIdx)]>,
+  visited: &mut FxHashSet<ModuleIdx>,
+  targets: &mut Vec<ModuleIdx>,
+) {
+  let mut stack = vec![root];
+  while let Some(module_idx) = stack.pop() {
+    let Module::Normal(importee) = &modules[module_idx] else { continue };
+    let importee_linking_info = &metas[importee.idx];
+
+    if !visited.insert(importee.idx) {
+      continue;
+    }
+
+    // Only collect modules whose wrapper is declared (i.e. the module is included in the output)
+    // and assigned to a chunk. Cross-chunk wrapper imports are registered after this pass.
+    if importee_linking_info.is_included
+      && order_state.esm_init_included_in_live_chunk(
+        importee_linking_info,
+        importee.idx,
+        chunk_graph,
+      )
+    {
+      targets.push(importee.idx);
+      continue;
+    }
+
+    if (retained_reexport_path.is_none()
+      && importee_linking_info.is_included
+      && chunk_graph.module_to_chunk[importee.idx] == Some(importer_chunk_idx))
+      || !matches!(importee.exports_kind, ExportsKind::Esm | ExportsKind::None)
+    {
+      continue;
+    }
+
+    // Importee is a non-included barrel module — traverse its static imports to find included
+    // wrapped importees transitively. Preserve recursive DFS order with an explicit LIFO stack:
+    // pushing children in reverse keeps source-order visitation left-to-right.
+    for (rec_idx, rec) in importee.import_records.iter_enumerated().rev() {
+      if retained_reexport_path.is_some_and(|path| !path.contains(&(importee.idx, rec_idx))) {
+        continue;
+      }
+      if rec.kind == ImportKind::Import
+        && let Some(sub_importee_idx) = rec.resolved_module
+      {
+        stack.push(sub_importee_idx);
+      }
     }
   }
-  discharged
 }

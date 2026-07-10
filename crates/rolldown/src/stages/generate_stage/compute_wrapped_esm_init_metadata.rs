@@ -1,9 +1,8 @@
 use oxc::ast::ast::{Declaration, Statement};
 use oxc_index::IndexVec;
 use rolldown_common::{
-  ChunkIdx, ConcatenateWrappedModuleKind, ExportsKind, ImportKind, ImportRecordIdx,
-  ImportRecordMeta, IndexModules, Module, ModuleIdx, NormalModule, StmtInfoIdx, StmtInfos,
-  WrapKind,
+  ChunkIdx, ConcatenateWrappedModuleKind, ImportKind, ImportRecordIdx, ImportRecordMeta,
+  IndexModules, Module, ModuleIdx, NormalModule, StmtInfoIdx, StmtInfos, WrapKind,
 };
 use rolldown_ecmascript::EcmaAst;
 use rolldown_utils::{index_vec_ext::IndexVecRefExt, rayon::ParallelIterator as _};
@@ -11,6 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
   chunk_graph::ChunkGraph,
+  esm_init_obligations::{collect_order_wrap_esm_init_targets, reexport_record_owns_hop},
   type_alias::IndexEcmaAst,
   types::linking_metadata::{LinkingMetadata, LinkingMetadataVec},
 };
@@ -252,13 +252,13 @@ fn transitive_esm_init_targets(
 /// It forwards on either of two conditions:
 /// - **execution dependency** — the record's target is a live execution dependency of the importer
 ///   (a side-effecting module the importer evaluates); or
-/// - **owns a re-export hop** — the record is a re-export the importer is not merely a walk-through
-///   interior for (`is_nested_reexport_record` is false). An init-owning barrel forwards its own
-///   re-export hops even when the direct target is side-effect free (so not a live execution
-///   dependency) and no per-symbol overlay was created because the bindings are consumed only via
-///   the barrel namespace object or resolve through a deeper level. The traversal only forwards to
-///   wrapped, live targets, so a genuinely unused pure re-export still forwards to nothing and stays
-///   droppable.
+/// - **owns a re-export hop** — [`reexport_record_owns_hop`], the shared ownership predicate: the
+///   record is a re-export the importer is not merely a walk-through interior for. An init-owning
+///   barrel forwards its own re-export hops even when the direct target is side-effect free (so not
+///   a live execution dependency) and no per-symbol overlay was created because the bindings are
+///   consumed only via the barrel namespace object or resolve through a deeper level. The traversal
+///   only forwards to wrapped, live targets, so a genuinely unused pure re-export still forwards to
+///   nothing and stays droppable.
 ///
 /// A third disjunct — "has an order-import overlay" — was previously ORed in but is redundant: every
 /// re-export record that carries an overlay is either non-nested (so already covered by the
@@ -273,10 +273,8 @@ fn order_wrap_record_forwards(
   root: ModuleIdx,
   is_reexport: bool,
 ) -> bool {
-  let was_execution_dependency = execution_dependencies.contains(&root);
-  let owns_reexport_hop =
-    is_reexport && !order_state.is_nested_reexport_record(importer_idx, rec_idx);
-  was_execution_dependency || owns_reexport_hop
+  execution_dependencies.contains(&root)
+    || reexport_record_owns_hop(order_state, importer_idx, rec_idx, is_reexport)
 }
 
 fn collect_legacy_esm_init_targets(
@@ -307,74 +305,6 @@ fn collect_legacy_esm_init_targets(
         if let Some(sub_importee_idx) = rec.resolved_module {
           stack.push(sub_importee_idx);
         }
-      }
-    }
-  }
-}
-
-/// Follow excluded re-exports through barrels to included wrapped importees.
-///
-/// Shared with the emergent-cycle fixpoint projector: called with `retained_reexport_path: None`
-/// on a *non-included* forwarder, it walks the forwarder's every static import to the wrapped
-/// modules they reach — the excluded-hop routing the real metadata pass performs, and the edge
-/// source the resolved-exports-only projection missed (Hole 2). The real pass can pass `Some(path)`
-/// even through a non-included forwarder (retained star paths are recorded pre-tree-shaking); the
-/// projector's `None` differs from that only at the same-chunk prune below, and every retained-path
-/// target is a resolved export of the importer that the projector already covers through its
-/// collector source — see `project_excluded_forwarder_edges`.
-#[expect(clippy::too_many_arguments)]
-pub(super) fn collect_order_wrap_esm_init_targets(
-  modules: &IndexModules,
-  metas: &LinkingMetadataVec,
-  chunk_graph: &ChunkGraph,
-  order_state: &OrderWrapState,
-  importer_chunk_idx: ChunkIdx,
-  root: ModuleIdx,
-  retained_reexport_path: Option<&[(ModuleIdx, ImportRecordIdx)]>,
-  visited: &mut FxHashSet<ModuleIdx>,
-  targets: &mut Vec<ModuleIdx>,
-) {
-  let mut stack = vec![root];
-  while let Some(module_idx) = stack.pop() {
-    let Module::Normal(importee) = &modules[module_idx] else { continue };
-    let importee_linking_info = &metas[importee.idx];
-
-    if !visited.insert(importee.idx) {
-      continue;
-    }
-
-    // Only collect modules whose wrapper is declared (i.e. the module is included in the output)
-    // and assigned to a chunk. Cross-chunk wrapper imports are registered after this pass.
-    if importee_linking_info.is_included
-      && order_state.esm_init_included_in_live_chunk(
-        importee_linking_info,
-        importee.idx,
-        chunk_graph,
-      )
-    {
-      targets.push(importee.idx);
-      continue;
-    }
-
-    if (retained_reexport_path.is_none()
-      && importee_linking_info.is_included
-      && chunk_graph.module_to_chunk[importee.idx] == Some(importer_chunk_idx))
-      || !matches!(importee.exports_kind, ExportsKind::Esm | ExportsKind::None)
-    {
-      continue;
-    }
-
-    // Importee is a non-included barrel module — traverse its static imports to find included
-    // wrapped importees transitively. Preserve recursive DFS order with an explicit LIFO stack:
-    // pushing children in reverse keeps source-order visitation left-to-right.
-    for (rec_idx, rec) in importee.import_records.iter_enumerated().rev() {
-      if retained_reexport_path.is_some_and(|path| !path.contains(&(importee.idx, rec_idx))) {
-        continue;
-      }
-      if rec.kind == ImportKind::Import
-        && let Some(sub_importee_idx) = rec.resolved_module
-      {
-        stack.push(sub_importee_idx);
       }
     }
   }
