@@ -88,7 +88,7 @@ Two shapes were challenged and deliberately kept:
 Two distinct prediction mechanisms exist; keep them separate.
 
 1. **Initial full-link prediction** (`predicted_static_import_edges`) runs the real cross-chunk
-   link pass with an *empty* order state to obtain the pre-lowering baseline chunk topology (value
+   link pass with an _empty_ order state to obtain the pre-lowering baseline chunk topology (value
    and side-effect edges, no `init_*` wrapper imports). This is the "runs the link pass twice"
    fidelity mechanism above; the plan and the at-risk analysis are computed against it.
 
@@ -100,7 +100,7 @@ Two distinct prediction mechanisms exist; keep them separate.
    startup crash. So each round the projector layers the plan's forwarding edges on the baseline,
    finds the chunk SCCs they close, marks every eligible module in a cyclic chunk at-risk, and
    rebuilds the plan until the at-risk set stops growing (monotone and finite — the projected
-   *topology* is not monotone, edges can shrink when a newly wrapped forwarder stops a deeper walk).
+   _topology_ is not monotone, edges can shrink when a newly wrapped forwarder stops a deeper walk).
    `ROLLDOWN_ORDER_DEBUG=1` traces per-round SCC counts and the final wrap delta.
 
 The projector reproduces, from a discovery-only probe order state (the same wrappers, nested-record
@@ -108,11 +108,11 @@ set, and per-record overlays the real lowering mints), exactly the three `init_*
 the linker registers — so it stays in lockstep with emission instead of forking a shortcut:
 
 - **Retained re-export overlays** — an importer's `OrderImportOverlay` referencing an order-wrapped
-  target's wrapper, registered with no init-owner gate, so an *eager* forwarder's cross-chunk hop
+  target's wrapper, registered with no init-owner gate, so an _eager_ forwarder's cross-chunk hop
   counts too. Admitted only for order-wrapped (not interop `WrapKind::Esm`) non-nested targets.
 - **Included + retained excluded re-export forwarding** — a wrapped importer's included imports and
   retained excluded re-export hops, via the shared `collect_wrapped_esm_init_targets_for_import_record`.
-- **Non-included forwarder hops** — a wrapped importer's re-export of a *non-included* forwarder,
+- **Non-included forwarder hops** — a wrapped importer's re-export of a _non-included_ forwarder,
   walking the forwarder's every static import (not just its resolved exports), the excluded-statement
   metadata routing.
 
