@@ -509,7 +509,16 @@ fn lower_order_state(
     output.state.insert_order_wrapper(module_idx, wrapper_ref, runtime_helper);
   }
 
-  populate_order_import_overlays(input, &reexport_usage, output.state, code_splitting_disabled);
+  // Real lowering runs once per bundle, so it builds its own reverse index here; the fixpoint
+  // projector passes the analysis-owned one instead of rebuilding per round.
+  let reverse_static_imports = super::order_analysis::reverse_static_import_index(input.modules);
+  populate_order_import_overlays(
+    input,
+    &reexport_usage,
+    output.state,
+    code_splitting_disabled,
+    &reverse_static_imports,
+  );
 }
 
 /// Mint the per-record [`OrderImportOverlay`]s for the current plan: a wrapper-referencing overlay
@@ -526,7 +535,17 @@ pub(super) fn populate_order_import_overlays(
   reexport_usage: &FrozenReexportUsage,
   state: &mut OrderWrapState,
   code_splitting_disabled: bool,
+  reverse_static_imports: &oxc_index::IndexVec<ModuleIdx, Vec<ModuleIdx>>,
 ) {
+  // Backward closure of the plan over the reverse static-import index: one walk answers every
+  // record's "does this importee's static-import subtree reach a plan member" instead of a
+  // per-record DFS.
+  let mut reaches_plan = FxHashSet::default();
+  super::order_analysis::grow_static_import_reachers(
+    reverse_static_imports,
+    input.plan.modules(),
+    &mut reaches_plan,
+  );
   for (importer_idx, module) in input.modules.iter_enumerated() {
     let Some(importer) = module.as_normal() else {
       continue;
@@ -549,7 +568,7 @@ pub(super) fn populate_order_import_overlays(
         };
         if !direct_target_is_planned {
           if let Some(retained_reexport_path) = retained_reexport_path
-            && static_import_reaches_plan(input, importee_idx)
+            && reaches_plan.contains(&importee_idx)
           {
             state.insert_import_overlay(
               OrderImportKey { importer: importer_idx, statement: stmt_info_idx, record: rec_idx },
@@ -590,30 +609,6 @@ pub(super) fn populate_order_import_overlays(
       }
     }
   }
-}
-
-fn static_import_reaches_plan(input: &OrderLoweringInput<'_>, root: ModuleIdx) -> bool {
-  let mut visited = rustc_hash::FxHashSet::default();
-  let mut stack = vec![root];
-  while let Some(module_idx) = stack.pop() {
-    if !visited.insert(module_idx) {
-      continue;
-    }
-    if input.plan.contains(&module_idx) {
-      return true;
-    }
-    let Some(module) = input.modules[module_idx].as_normal() else {
-      continue;
-    };
-    stack.extend(
-      module
-        .import_records
-        .iter()
-        .filter(|rec| rec.kind == ImportKind::Import)
-        .filter_map(|rec| rec.resolved_module),
-    );
-  }
-  false
 }
 
 pub(super) fn collect_frozen_reexport_usage(input: &OrderLoweringInput<'_>) -> FrozenReexportUsage {

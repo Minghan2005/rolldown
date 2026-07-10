@@ -155,8 +155,21 @@ impl GenerateStage<'_> {
     // at-risk, and repeat. That makes the cyclic chunks wrap-all-equivalent (no eager body runs
     // mid-cycle), which is the standing correctness proof; the extra wrapping is bounded to
     // emergent-cycle members, the at-risk set only grows, and it is finite — so this converges.
-    let mut plan =
-      self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
+    //
+    // Both inputs below are plan-independent, so they are computed once for every plan rebuild:
+    // the roots never change across rounds, and the reverse index inverts the static module graph,
+    // not anything the plan mints.
+    let source_reachable = self.source_reachable_modules(&roots);
+    let reverse_static_imports =
+      reverse_static_import_index(&self.link_output.module_table.modules);
+    let mut plan = self.build_order_wrap_plan(
+      all_at_risk.clone(),
+      &roots,
+      chunk_graph,
+      &chunk_cycles,
+      &source_reachable,
+      &reverse_static_imports,
+    );
     let one_shot_planned = plan.len();
     order_debug_trace(|| {
       format!(
@@ -171,8 +184,13 @@ impl GenerateStage<'_> {
       // Project the chunk edges the current plan's lowering will add — the `init_*` forwarding
       // imports of wrapped modules — on top of the pre-lowering baseline, then find the chunk
       // cycles those emergent edges close.
-      let post_edges =
-        self.post_lowering_import_edges(chunk_graph, &plan, &import_edges, used_symbol_refs);
+      let post_edges = self.post_lowering_import_edges(
+        chunk_graph,
+        &plan,
+        &import_edges,
+        used_symbol_refs,
+        &reverse_static_imports,
+      );
       let post_cycles = ChunkCycles::from_import_edges(&post_edges);
       // Mark every eligible module hosted in an emergent cyclic chunk at-risk. Wrapping them all
       // (not only the order-sensitive ones) removes every eager body from those chunks, matching the
@@ -198,7 +216,14 @@ impl GenerateStage<'_> {
       if added == 0 {
         break;
       }
-      plan = self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
+      plan = self.build_order_wrap_plan(
+        all_at_risk.clone(),
+        &roots,
+        chunk_graph,
+        &chunk_cycles,
+        &source_reachable,
+        &reverse_static_imports,
+      );
       assert!(iterations < iteration_cap, "order-wrap emergent-cycle fixpoint did not converge");
     }
     order_debug_trace(|| {
@@ -273,9 +298,11 @@ impl GenerateStage<'_> {
     plan: &OrderWrapPlan,
     baseline: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
     used_symbol_refs: &UsedSymbolRefsBuilder,
+    reverse_static_imports: &IndexVec<ModuleIdx, Vec<ModuleIdx>>,
   ) -> IndexVec<ChunkIdx, FxHashSet<ChunkIdx>> {
     let mut edges = baseline.clone();
-    let probe_state = self.probe_order_state(chunk_graph, plan, used_symbol_refs);
+    let probe_state =
+      self.probe_order_state(chunk_graph, plan, used_symbol_refs, reverse_static_imports);
 
     for module in self.link_output.module_table.modules.iter().filter_map(Module::as_normal) {
       let importer_idx = module.idx;
@@ -515,6 +542,7 @@ impl GenerateStage<'_> {
     chunk_graph: &ChunkGraph,
     plan: &OrderWrapPlan,
     used_symbol_refs: &UsedSymbolRefsBuilder,
+    reverse_static_imports: &IndexVec<ModuleIdx, Vec<ModuleIdx>>,
   ) -> super::order_wrap_state::OrderWrapState {
     let mut probe_state = super::order_wrap_state::OrderWrapState::default();
     for module_idx in plan.modules() {
@@ -557,6 +585,7 @@ impl GenerateStage<'_> {
       &reexport_usage,
       &mut probe_state,
       self.options.code_splitting.is_disabled(),
+      reverse_static_imports,
     );
     probe_state
   }
@@ -800,8 +829,9 @@ impl GenerateStage<'_> {
     roots: &[RootOrderAnalysis],
     chunk_graph: &ChunkGraph,
     chunk_cycles: &ChunkCycles,
+    source_reachable: &FxHashSet<ModuleIdx>,
+    reverse_static_imports: &IndexVec<ModuleIdx, Vec<ModuleIdx>>,
   ) -> OrderWrapPlan {
-    let source_reachable = self.source_reachable_modules(roots);
     let mut plan = OrderWrapPlan::default();
     for module_idx in
       at_risk.into_iter().filter(|module_idx| self.is_order_wrap_eligible(*module_idx))
@@ -809,12 +839,20 @@ impl GenerateStage<'_> {
       plan.insert(module_idx);
     }
 
+    // Backward closure of the current plan members over the reverse static-import index: exactly
+    // the modules whose static imports reach a member. The plan only grows inside this loop, so the
+    // closure grows monotonically — each iteration expands only from the members added since the
+    // last one (already-closed seeds are skipped by the insert check) instead of re-walking the
+    // graph per candidate module.
+    let mut reaches_member = FxHashSet::default();
+
     loop {
       let mut changed = false;
       changed |= self.close_expected_sensitive_suffixes(roots, &mut plan);
       changed |= self.close_cyclic_chunk_members(chunk_graph, chunk_cycles, &mut plan);
 
       let current = plan.modules().collect::<FxHashSet<_>>();
+      grow_static_import_reachers(reverse_static_imports, plan.modules(), &mut reaches_member);
 
       for module in self.link_output.module_table.modules.iter().filter_map(Module::as_normal) {
         if !source_reachable.contains(&module.idx)
@@ -823,7 +861,7 @@ impl GenerateStage<'_> {
         {
           continue;
         }
-        if self.statically_imports_wrapped_member(module.idx, &current)
+        if self.statically_imports_wrapped_member(module.idx, &current, &reaches_member)
           || self.top_level_reads_wrapped_export(module.idx, &current)
         {
           changed |= plan.insert(module.idx);
@@ -919,6 +957,7 @@ impl GenerateStage<'_> {
     &self,
     module_idx: ModuleIdx,
     current: &FxHashSet<ModuleIdx>,
+    reaches_member: &FxHashSet<ModuleIdx>,
   ) -> bool {
     let Some(module) = self.link_output.module_table[module_idx].as_normal() else {
       return false;
@@ -927,36 +966,13 @@ impl GenerateStage<'_> {
     if !meta.execution_dependencies.iter().any(|dependency| current.contains(dependency)) {
       return false;
     }
+    // `reaches_member` is the precomputed backward closure of `current`, so this membership test
+    // answers "does this importee's static-import subtree reach a plan member" without a per-query
+    // graph walk.
     module.import_records.iter().any(|rec| {
       rec.kind == ImportKind::Import
-        && rec
-          .resolved_module
-          .is_some_and(|importee_idx| self.static_import_reaches_member(importee_idx, current))
+        && rec.resolved_module.is_some_and(|importee_idx| reaches_member.contains(&importee_idx))
     })
-  }
-
-  fn static_import_reaches_member(&self, root: ModuleIdx, current: &FxHashSet<ModuleIdx>) -> bool {
-    let mut visited = FxHashSet::default();
-    let mut stack = vec![root];
-    while let Some(module_idx) = stack.pop() {
-      if !visited.insert(module_idx) {
-        continue;
-      }
-      if current.contains(&module_idx) {
-        return true;
-      }
-      let Some(module) = self.link_output.module_table[module_idx].as_normal() else {
-        continue;
-      };
-      stack.extend(
-        module
-          .import_records
-          .iter()
-          .filter(|rec| rec.kind == ImportKind::Import)
-          .filter_map(|rec| rec.resolved_module),
-      );
-    }
-    false
   }
 
   fn top_level_reads_wrapped_export(
@@ -1083,6 +1099,44 @@ impl GenerateStage<'_> {
     };
     matches!(module.exports_kind, ExportsKind::Esm | ExportsKind::None)
       && matches!(self.link_output.metas[module_idx].wrap_kind(), WrapKind::None)
+  }
+}
+
+/// Importee → normal importers holding a static `import` record to it: the exact reverse of the
+/// edges the plan-closure reachability walks traverse (only normal modules expand; any resolved
+/// importee is a node). Plan-independent, so one index serves every fixpoint round.
+pub(super) fn reverse_static_import_index(
+  modules: &rolldown_common::IndexModules,
+) -> IndexVec<ModuleIdx, Vec<ModuleIdx>> {
+  let mut reverse: IndexVec<ModuleIdx, Vec<ModuleIdx>> = index_vec![Vec::new(); modules.len()];
+  for module in modules.iter().filter_map(Module::as_normal) {
+    for rec in &module.import_records {
+      if rec.kind == ImportKind::Import
+        && let Some(importee_idx) = rec.resolved_module
+      {
+        reverse[importee_idx].push(module.idx);
+      }
+    }
+  }
+  reverse
+}
+
+/// Grow `reached` to the backward closure of `seeds` over the reverse static-import index:
+/// afterwards `reached` holds exactly the modules from which some seed is reachable through static
+/// `import` edges (seeds included — a module reaches itself). Monotone: seeds already in `reached`
+/// are skipped, so repeated calls with a growing seed set expand only the new frontier.
+pub(super) fn grow_static_import_reachers(
+  reverse_static_imports: &IndexVec<ModuleIdx, Vec<ModuleIdx>>,
+  seeds: impl Iterator<Item = ModuleIdx>,
+  reached: &mut FxHashSet<ModuleIdx>,
+) {
+  let mut stack = seeds.filter(|seed| reached.insert(*seed)).collect_vec();
+  while let Some(module_idx) = stack.pop() {
+    for &importer_idx in &reverse_static_imports[module_idx] {
+      if reached.insert(importer_idx) {
+        stack.push(importer_idx);
+      }
+    }
   }
 }
 
