@@ -93,6 +93,24 @@ impl OrderWrapState {
     self.modules.contains_key(&module_idx)
   }
 
+  /// Whether `symbol_ref` is the wrapper (`init_*`) binding of an execution-order-wrapped module.
+  ///
+  /// Such a wrapper self-rebinds on first call (`function init_x() { return (init_x =
+  /// __esmMin(cb))() }`), so every later caller must observe a *live* view of the binding to run
+  /// the module body exactly once. A value snapshot of the binding taken before the first call
+  /// (e.g. `exports.init_x = init_x`) would freeze the pre-rebind function and re-execute the body
+  /// on every subsequent call. Cross-chunk exports of these wrappers must therefore stay live
+  /// getters.
+  ///
+  /// Interop `WrapKind::Esm` wrappers live in [`LinkingMetadata`], not in this state, and order
+  /// wrappers are only created for `WrapKind::None` modules (see `lower_order_state`), so this
+  /// matches exactly the `EsmInitOrigin::ExecutionOrder` targets and never an interop wrapper.
+  ///
+  /// [`LinkingMetadata`]: crate::types::linking_metadata::LinkingMetadata
+  pub(crate) fn is_execution_order_wrapper_ref(&self, symbol_ref: SymbolRef) -> bool {
+    self.modules.get(&symbol_ref.owner).is_some_and(|module| module.wrapper_ref == symbol_ref)
+  }
+
   pub(crate) fn set_nested_reexport_records(
     &mut self,
     records: FxHashSet<(ModuleIdx, ImportRecordIdx)>,
@@ -553,6 +571,24 @@ mod tests {
     assert_eq!(target.wrapper_ref, wrapper_ref);
     assert!(!target.init_is_noop);
     assert!(target.tla_tainted);
+  }
+
+  #[test]
+  fn execution_order_wrapper_ref_matches_only_the_wrapper_binding() {
+    let module_idx = ModuleIdx::new(7);
+    let wrapper_ref = SymbolRef::from((module_idx, SymbolId::from_usize(0)));
+    let other_ref_same_module = SymbolRef::from((module_idx, SymbolId::from_usize(1)));
+    let ref_in_unwrapped_module = SymbolRef::from((ModuleIdx::new(8), SymbolId::from_usize(0)));
+    let mut state = OrderWrapState::default();
+    state.insert_order_wrapper(module_idx, wrapper_ref, RuntimeHelper::EsmMin);
+
+    // Exactly the order wrapper's own `init_*` binding is recognized: a live cross-chunk export
+    // of it must stay a getter.
+    assert!(state.is_execution_order_wrapper_ref(wrapper_ref));
+    // Another symbol declared by the same wrapped module (e.g. an exported value) is not.
+    assert!(!state.is_execution_order_wrapper_ref(other_ref_same_module));
+    // A symbol owned by a module without an order wrapper is not.
+    assert!(!state.is_execution_order_wrapper_ref(ref_in_unwrapped_module));
   }
 
   #[test]
