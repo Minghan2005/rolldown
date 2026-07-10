@@ -183,6 +183,10 @@ impl GenerateStage<'_> {
   }
 
   /// Compute provisional links for order analysis. Runtime symbol placement is cleared if moved.
+  /// Uses an empty order state, so the edges are the *pre-lowering* baseline topology (value and
+  /// side-effect imports, before any wrapping adds `init_*` wrapper imports). The emergent-cycle
+  /// fixpoint layers the plan's `init_*` forwarding edges on top of this baseline
+  /// (`post_lowering_import_edges`).
   pub(super) fn predicted_static_import_edges(
     &mut self,
     chunk_graph: &ChunkGraph,

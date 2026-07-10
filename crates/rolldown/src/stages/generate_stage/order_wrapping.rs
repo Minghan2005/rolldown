@@ -475,7 +475,7 @@ impl GenerateStage<'_> {
     chunk_graph.rebuild_sorted_chunk_idx_vec(true);
   }
 
-  fn esm_runtime_helper(&self) -> RuntimeHelper {
+  pub(super) fn esm_runtime_helper(&self) -> RuntimeHelper {
     if self.options.profiler_names { RuntimeHelper::Esm } else { RuntimeHelper::EsmMin }
   }
 }

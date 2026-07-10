@@ -2,12 +2,15 @@ use itertools::Itertools;
 use oxc_index::{IndexVec, index_vec};
 use petgraph::prelude::DiGraphMap;
 use rolldown_common::{
-  ChunkIdx, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx, Module, ModuleIdx,
-  SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
+  ChunkIdx, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx, ImportRecordMeta, Module,
+  ModuleIdx, SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::chunk_graph::ChunkGraph;
+use crate::module_finalizers::{
+  WrappedEsmInitTargetContext, collect_wrapped_esm_init_targets_for_import_record,
+};
 
 use super::GenerateStage;
 
@@ -33,6 +36,10 @@ impl OrderWrapPlan {
 
   pub(super) fn is_empty(&self) -> bool {
     self.modules.is_empty()
+  }
+
+  pub(super) fn len(&self) -> usize {
+    self.modules.len()
   }
 
   pub(super) fn modules(&self) -> impl Iterator<Item = ModuleIdx> + '_ {
@@ -104,8 +111,171 @@ impl GenerateStage<'_> {
       roots.push(RootOrderAnalysis { root, expected_order });
     }
 
-    let plan = self.build_order_wrap_plan(all_at_risk, &roots, chunk_graph, &chunk_cycles);
+    // The plan is computed against the *predicted* (pre-lowering) chunk edges, which are acyclic
+    // for the apps that hit this bug. But applying the plan makes the lowering add its own
+    // cross-chunk imports — `init_*` wrapper imports and value imports of newly-wrapped modules —
+    // which can close chunk cycles the one-shot analysis never saw. An eager module hosted in such
+    // an emergent-cycle chunk runs its record-position `init_*()` during the cycle's evaluation and
+    // reads a sibling chunk that has not been assigned yet (vue-vben-admin: `qe is not a function`,
+    // where `qe = __commonJSMin(dayjs/plugin/timezone)` lives in a cycle-sibling chunk). Wrap-all is
+    // immune because it defers every module body, so a cyclic chunk holds only hoisted declarations;
+    // on-demand must close the loop: recompute the chunk edges *including* the lowering's added
+    // imports for the current plan, mark every eligible module hosted in a resulting cyclic chunk
+    // at-risk, and repeat. That makes the cyclic chunks wrap-all-equivalent (no eager body runs
+    // mid-cycle), which is the standing correctness proof; the extra wrapping is bounded to
+    // emergent-cycle members, the at-risk set only grows, and it is finite — so this converges.
+    let mut plan =
+      self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
+    // The at-risk set is monotone and finite; this bound only guards against a logic error.
+    let iteration_cap = self.link_output.module_table.modules.len() + 1;
+    let mut iterations = 0usize;
+    loop {
+      // Project the chunk edges the current plan's lowering will add — the `init_*` forwarding
+      // imports of wrapped modules — on top of the pre-lowering baseline, then find the chunk
+      // cycles those emergent edges close.
+      let post_edges = self.post_lowering_import_edges(chunk_graph, &plan, &import_edges);
+      let post_cycles = ChunkCycles::from_import_edges(&post_edges);
+      // Mark every eligible module hosted in an emergent cyclic chunk at-risk. Wrapping them all
+      // (not only the order-sensitive ones) removes every eager body from those chunks, matching the
+      // wrap-all shape that is provably safe under cyclic evaluation. `all_at_risk` only grows.
+      let mut grew = false;
+      for scc in &post_cycles.sccs {
+        for &chunk_idx in scc {
+          for &module_idx in &chunk_graph.chunk_table[chunk_idx].modules {
+            if self.is_order_wrap_eligible(module_idx) {
+              grew |= all_at_risk.insert(module_idx);
+            }
+          }
+        }
+      }
+      iterations += 1;
+      if !grew {
+        break;
+      }
+      plan = self.build_order_wrap_plan(all_at_risk.clone(), &roots, chunk_graph, &chunk_cycles);
+      assert!(iterations < iteration_cap, "order-wrap emergent-cycle fixpoint did not converge");
+    }
+    tracing::debug!(
+      target: "order_analysis",
+      iterations,
+      planned_modules = plan.len(),
+      "emergent-cycle fixpoint converged"
+    );
     Some(OrderAnalysis { plan, import_edges })
+  }
+
+  /// Project the chunk-level static import edges the lowering of `plan` will produce, as the
+  /// pre-lowering `baseline` edges plus the `init_*` forwarding edges wrapping adds. A wrapped
+  /// module's `init_*` calls the `init_*` of every wrapped module its included static imports reach
+  /// (directly or forwarded through an eager barrel), so its chunk gains an import of that target's
+  /// chunk. These forwarding edges are exactly what closes the emergent cycles the one-shot
+  /// analysis misses; unioning them with the baseline value/side-effect edges (already an
+  /// over-approximation, since it omits the wrapping's own liveness suppression) yields a sound
+  /// superset of the real post-lowering topology — sound because over-approximating edges only ever
+  /// wraps more, which is always legal.
+  ///
+  /// This is a pure projection keyed on `ModuleIdx`: it neither mints wrapper symbols nor mutates
+  /// symbol chunk ownership. Target resolution reuses the finalizer's own
+  /// `collect_wrapped_esm_init_targets_for_import_record` (fed a discovery-only order state that
+  /// simply marks the planned modules wrapped) so it stays in lockstep with what the finalizer
+  /// emits.
+  fn post_lowering_import_edges(
+    &self,
+    chunk_graph: &ChunkGraph,
+    plan: &OrderWrapPlan,
+    baseline: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+  ) -> IndexVec<ChunkIdx, FxHashSet<ChunkIdx>> {
+    let mut edges = baseline.clone();
+    let probe_state = self.probe_order_state(plan);
+
+    for module in self.link_output.module_table.modules.iter().filter_map(Module::as_normal) {
+      let importer_idx = module.idx;
+      let meta = &self.link_output.metas[importer_idx];
+      // Only a module that carries its own ESM `init_*` (an order-wrapped plan member or an interop
+      // `WrapKind::Esm` module) forwards init to the modules it imports.
+      if probe_state.esm_init_target(importer_idx, meta).is_none() {
+        continue;
+      }
+      let Some(importer_chunk) = chunk_graph.module_to_chunk[importer_idx] else {
+        continue;
+      };
+      let ctx = WrappedEsmInitTargetContext {
+        importer: module,
+        importer_meta: meta,
+        modules: &self.link_output.module_table.modules,
+        metas: &self.link_output.metas,
+        stmt_infos: &self.link_output.stmt_infos,
+        symbol_db: &self.link_output.symbol_db,
+        order_wrap_state: &probe_state,
+        strict_execution_order: true,
+      };
+      for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[importer_idx].iter_enumerated()
+      {
+        let stmt_is_included = meta.stmt_info_included.has_bit(stmt_info_idx);
+        for &rec_idx in &stmt_info.import_records {
+          let rec = &module.import_records[rec_idx];
+          if rec.kind != ImportKind::Import {
+            continue;
+          }
+          // An included statement's targets are emitted at its own position; an *excluded*
+          // statement still forwards when it is a re-export hop the wrapped importer owns (the
+          // `transitive_esm_init_targets` path: a tree-shaken `export … from` emits nothing, so the
+          // importer's `init_*` calls the hop targets' `init_*` in its place). Non-re-export
+          // excluded records forward nothing and are skipped.
+          if !stmt_is_included
+            && !rec
+              .meta
+              .intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
+          {
+            continue;
+          }
+          // Resolve targets exactly as the finalizer will, but treat every wrapper as reachable —
+          // we are discovering which chunk edges *would* be created, not filtering to a chunk.
+          let targets = collect_wrapped_esm_init_targets_for_import_record(
+            &ctx,
+            rec_idx,
+            |_| true,
+            |forwarding_module_idx| {
+              chunk_graph.module_to_chunk[forwarding_module_idx] == Some(importer_chunk)
+            },
+          );
+          for target_idx in targets {
+            if let Some(target_chunk) = chunk_graph.module_to_chunk[target_idx]
+              && target_chunk != importer_chunk
+              && chunk_graph.module_is_in_live_chunk(target_idx)
+            {
+              edges[importer_chunk].insert(target_chunk);
+            }
+          }
+        }
+      }
+    }
+
+    edges
+  }
+
+  /// A discovery-only [`OrderWrapState`] that marks exactly the plan's modules order-wrapped, so
+  /// `esm_init_target` answers "is this module wrapped by this plan?" during edge projection.
+  /// Reuses each module's existing namespace symbol as the wrapper placeholder — the projector only
+  /// reads target *identity*, never the wrapper symbol's value — so no facade symbols are minted and
+  /// no symbol chunk ownership is touched. Built fresh per fixpoint round, so it always reflects the
+  /// current plan with no stale routes.
+  fn probe_order_state(&self, plan: &OrderWrapPlan) -> super::order_wrap_state::OrderWrapState {
+    let runtime_helper = self.esm_runtime_helper();
+    let mut probe_state = super::order_wrap_state::OrderWrapState::default();
+    for module_idx in plan.modules() {
+      if !self.is_order_wrap_eligible(module_idx) {
+        // Only `WrapKind::None` ESM/None modules become order wrappers (mirrors `lower_order_state`);
+        // an interop wrapper is already visible to `esm_init_target` through its metadata.
+        continue;
+      }
+      let placeholder_wrapper_ref = self.link_output.module_table.modules[module_idx]
+        .as_normal()
+        .expect("order wrap only applies to normal modules")
+        .namespace_object_ref;
+      probe_state.insert_order_wrapper(module_idx, placeholder_wrapper_ref, runtime_helper);
+    }
+    probe_state
   }
 
   fn wrap_all_order_analysis(&self, chunk_graph: &ChunkGraph) -> OrderAnalysis {

@@ -1,0 +1,15 @@
+{
+  "config": {
+    "input": [{ "name": "main", "import": "./main.js" }],
+    "strictExecutionOrder": true,
+    "experimental": { "onDemandWrapping": true },
+    "codeSplitting": {
+      "includeDependenciesRecursively": false,
+      "groups": [
+        { "name": "s", "test": "/s/" },
+        { "name": "h", "test": "/h/" }
+      ]
+    }
+  },
+  "configVariants": [{ "_configName": "wrap-all", "onDemandWrapping": false }]
+}
