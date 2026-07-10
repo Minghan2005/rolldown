@@ -520,7 +520,6 @@ impl GenerateStage<'_> {
     plan: &OrderWrapPlan,
     used_symbol_refs: &UsedSymbolRefsBuilder,
   ) -> super::order_wrap_state::OrderWrapState {
-    let runtime_helper = self.esm_runtime_helper();
     let mut probe_state = super::order_wrap_state::OrderWrapState::default();
     for module_idx in plan.modules() {
       if !self.is_order_wrap_eligible(module_idx) {
@@ -532,7 +531,7 @@ impl GenerateStage<'_> {
         .as_normal()
         .expect("order wrap only applies to normal modules")
         .namespace_object_ref;
-      probe_state.insert_order_wrapper(module_idx, placeholder_wrapper_ref, runtime_helper);
+      probe_state.insert_order_wrapper_probe(module_idx, placeholder_wrapper_ref);
       if let Some(chunk_idx) = chunk_graph.module_to_chunk[module_idx] {
         probe_state.assign_order_wrapper_chunk(module_idx, chunk_idx);
       }
