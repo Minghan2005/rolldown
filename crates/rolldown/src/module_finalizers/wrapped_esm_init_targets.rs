@@ -170,6 +170,15 @@ fn wrapped_esm_target_is_reachable(
 /// importer must instead resolve through the forwarder's exports and own the triggers for the
 /// bindings it actually consumes — the named-import resolution below the early return, which
 /// keeps a legally dead hop silent because only consumed bindings are followed.
+///
+/// OPEN QUESTION (hypothesis, no repro — do not chase without one): this check consults only the
+/// statement *inclusion* bits, while finalization additionally suppresses records marked "nested"
+/// (`module_finalizers::mod` transform-or-remove and the `export *` path). If a directly consumed,
+/// included hop could also be nested — and therefore emitted nowhere despite counting as
+/// discharged here — the caller would wrongly delegate to a silent forwarder. No graph is known to
+/// produce a nested *and* directly-consumed-included hop (nesting marks a record a wrapped ancestor
+/// walks through, which owns the init instead), so this stays a documented invariant to revisit
+/// only if a failing fixture appears.
 fn eager_forwarder_discharges_own_hops(
   ctx: &WrappedEsmInitTargetContext<'_>,
   module_idx: ModuleIdx,

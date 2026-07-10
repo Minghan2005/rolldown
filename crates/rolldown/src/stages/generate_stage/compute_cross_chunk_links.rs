@@ -180,6 +180,37 @@ impl GenerateStage<'_> {
         "predicted static chunk import edges diverged for chunk {chunk_idx:?}",
       );
     }
+
+    // Empty entry facades (order-wrap trigger facades and dynamic-entry facades) hold zero modules,
+    // so they export no symbols and nothing can depend on them across a *static* import — their only
+    // inbound edges are dynamic, routed through `entry_module_to_entry_chunk` outside the static SCC
+    // graph. The emergent-cycle projector relies on this to soundly omit facade edges from its
+    // static chunk-SCC search (`post_lowering_import_edges` doc): a facade can never sit inside a
+    // static cycle, so the "entry-facade transitive init imports" edge source is not constructible.
+    // Assert it so a future change that gives a facade static indegree trips here instead of silently
+    // defeating the projection.
+    #[cfg(debug_assertions)]
+    if self.options.is_strict_execution_order_enabled() {
+      let empty_facades = chunk_graph
+        .chunk_table
+        .iter_enumerated()
+        .filter(|(_, chunk)| {
+          matches!(chunk.kind, ChunkKind::EntryPoint { .. }) && chunk.modules.is_empty()
+        })
+        .map(|(idx, _)| idx)
+        .collect::<FxHashSet<_>>();
+      if !empty_facades.is_empty() {
+        for chunk in chunk_graph.chunk_table.iter() {
+          for importee in chunk.imports_from_other_chunks.keys() {
+            debug_assert!(
+              !empty_facades.contains(importee),
+              "an empty entry facade gained a static import edge, defeating the projector's \
+               zero-static-indegree assumption",
+            );
+          }
+        }
+      }
+    }
   }
 
   /// Compute provisional links for order analysis. Runtime symbol placement is cleared if moved.

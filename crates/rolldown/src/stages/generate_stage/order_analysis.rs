@@ -5,7 +5,7 @@ use oxc_index::{IndexVec, index_vec};
 use petgraph::prelude::DiGraphMap;
 use rolldown_common::{
   ChunkIdx, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx, ImportRecordMeta, Module,
-  ModuleIdx, SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
+  ModuleIdx, NormalModule, SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -15,6 +15,8 @@ use crate::module_finalizers::{
 };
 
 use super::GenerateStage;
+use super::compute_wrapped_esm_init_metadata::collect_order_wrap_esm_init_targets;
+use super::order_wrap_state::EsmInitOrigin;
 
 /// `ROLLDOWN_ORDER_DEBUG=1` turns on a stderr trace of the on-demand emergent-cycle fixpoint:
 /// the one-shot plan size, per-round emergent-cyclic-SCC shape and at-risk growth, and the final
@@ -30,7 +32,10 @@ static ORDER_DEBUG: LazyLock<bool> = LazyLock::new(|| {
 /// so building the (allocating) string is skipped entirely in normal builds.
 fn order_debug_trace(message: impl FnOnce() -> String) {
   if *ORDER_DEBUG {
-    eprintln!("{}", message());
+    #[expect(clippy::print_stderr, reason = "opt-in ROLLDOWN_ORDER_DEBUG diagnostic trace")]
+    {
+      eprintln!("{}", message());
+    }
   }
 }
 
@@ -160,7 +165,8 @@ impl GenerateStage<'_> {
       // Project the chunk edges the current plan's lowering will add — the `init_*` forwarding
       // imports of wrapped modules — on top of the pre-lowering baseline, then find the chunk
       // cycles those emergent edges close.
-      let post_edges = self.post_lowering_import_edges(chunk_graph, &plan, &import_edges);
+      let post_edges =
+        self.post_lowering_import_edges(chunk_graph, &plan, &import_edges, used_symbol_refs);
       let post_cycles = ChunkCycles::from_import_edges(&post_edges);
       // Mark every eligible module hosted in an emergent cyclic chunk at-risk. Wrapping them all
       // (not only the order-sensitive ones) removes every eager body from those chunks, matching the
@@ -206,88 +212,104 @@ impl GenerateStage<'_> {
   }
 
   /// Project the chunk-level static import edges the lowering of `plan` will produce, as the
-  /// pre-lowering `baseline` edges plus the `init_*` forwarding edges wrapping adds. A wrapped
-  /// module's `init_*` calls the `init_*` of every wrapped module its included static imports reach
-  /// (directly or forwarded through an eager barrel), so its chunk gains an import of that target's
-  /// chunk. These forwarding edges are exactly what closes the emergent cycles the one-shot
-  /// analysis misses; unioning them with the baseline value/side-effect edges (already an
-  /// over-approximation, since it omits the wrapping's own liveness suppression) yields a sound
-  /// superset of the real post-lowering topology — sound because over-approximating edges only ever
-  /// wraps more, which is always legal.
+  /// pre-lowering `baseline` edges plus the cross-chunk `init_*` forwarding edges wrapping adds.
+  /// Applying a wrap plan makes the linker register three distinct kinds of `init_*` dependency
+  /// (`add_module_esm_init_depended_symbols`), and this projection reproduces all three from a
+  /// discovery-only probe state — carrying the same order wrappers, nested-record set, and per-record
+  /// overlays the real lowering mints (see `probe_order_state`) — so the fixpoint sees exactly the
+  /// emergent cycles the real link pass will close. Every projected edge source, and every
+  /// deliberately-omitted one, is enumerated here.
+  ///
+  /// PROJECTED:
+  /// - **Retained re-export overlays** ([`Self::project_reexport_overlay_edges`]) — an importer that
+  ///   re-exports (or has an active execution-dependency import of) an order-wrapped module
+  ///   references that module's wrapper from its own chunk, *even when the importer is eager and
+  ///   owns no `init_*`*. Mirrors the `OrderImportOverlay` `lower_order_state` mints and
+  ///   `add_order_import_overlay_depended_symbols` registers with no init-owner gate. The old
+  ///   projection walked only importers owning an `init_*`, so it missed every eager forwarder — see
+  ///   the `emergent_cycle_eager_reexport_overlay` fixture.
+  /// - **Included + retained excluded re-export forwarding** ([`Self::project_collector_edges`]) — a
+  ///   wrapped importer's `init_*` calls the `init_*` of every wrapped module its included static
+  ///   imports and retained excluded re-export hops reach, resolved by the finalizer's own
+  ///   `collect_wrapped_esm_init_targets_for_import_record` (mirrors
+  ///   `add_included_import_esm_init_depended_symbols` and the resolved-exports registration). This
+  ///   is the drift-free core the original projection already performed.
+  /// - **Non-included forwarder hops** ([`Self::project_excluded_forwarder_edges`]) — a wrapped
+  ///   importer's re-export of a *non-included* forwarder forwards to every wrapped module the
+  ///   forwarder's static imports reach, walking the forwarder itself (not just its resolved
+  ///   exports) via the shared `collect_order_wrap_esm_init_targets`. Mirrors the excluded-statement
+  ///   metadata routing `add_transitive_esm_init_depended_symbols` registers — invisible to the
+  ///   resolved-exports-only projection (see the `emergent_cycle_excluded_forwarder_import` fixture).
+  ///
+  /// DELIBERATELY OMITTED:
+  /// - **Interop `WrapKind::Esm` overlay edges and consumption-gated hops** — the overlay projection
+  ///   admits only order-wrapped (`EsmInitOrigin::ExecutionOrder`) direct targets whose record is not
+  ///   a nested re-export. An interop target's wrapper edge already exists in the flag-off baseline,
+  ///   and a nested hop's init is owned by a wrapped ancestor and tree-shaken away for an eager
+  ///   forwarder (its `init_*` import is DCE'd). Projecting either would fabricate a cycle and
+  ///   over-wrap a tree-shaking-equivalent graph (the `retained_star_renamed_cycle` shape).
+  /// - **Entry-facade transitive init imports** — an entry facade holds zero modules, so it has zero
+  ///   internal static indegree and can never sit inside a static chunk SCC; only dynamic edges route
+  ///   through it (asserted in `compute_cross_chunk_links`). So no facade edge is constructible.
+  ///
+  /// Unioning the projected edges with the baseline value/side-effect edges still over-approximates
+  /// the real post-lowering topology — it omits the wrapping's own liveness suppression — which is
+  /// sound: extra edges only ever wrap more, and wrapping more is always legal (wrap-all wraps
+  /// everything and is the standing correctness proof).
   ///
   /// This is a pure projection keyed on `ModuleIdx`: it neither mints wrapper symbols nor mutates
-  /// symbol chunk ownership. Target resolution reuses the finalizer's own
-  /// `collect_wrapped_esm_init_targets_for_import_record` (fed a discovery-only order state that
-  /// simply marks the planned modules wrapped) so it stays in lockstep with what the finalizer
-  /// emits.
+  /// symbol chunk ownership. It reuses the finalizer's and the metadata pass's own target resolvers,
+  /// fed a probe order state that marks the planned modules wrapped, so it stays in lockstep with
+  /// what the linker registers and the finalizer emits.
   fn post_lowering_import_edges(
     &self,
     chunk_graph: &ChunkGraph,
     plan: &OrderWrapPlan,
     baseline: &IndexVec<ChunkIdx, FxHashSet<ChunkIdx>>,
+    used_symbol_refs: &UsedSymbolRefsBuilder,
   ) -> IndexVec<ChunkIdx, FxHashSet<ChunkIdx>> {
     let mut edges = baseline.clone();
-    let probe_state = self.probe_order_state(plan);
+    let probe_state = self.probe_order_state(chunk_graph, plan, used_symbol_refs);
 
     for module in self.link_output.module_table.modules.iter().filter_map(Module::as_normal) {
       let importer_idx = module.idx;
       let meta = &self.link_output.metas[importer_idx];
-      // Only a module that carries its own ESM `init_*` (an order-wrapped plan member or an interop
-      // `WrapKind::Esm` module) forwards init to the modules it imports.
-      if probe_state.esm_init_target(importer_idx, meta).is_none() {
-        continue;
-      }
       let Some(importer_chunk) = chunk_graph.module_to_chunk[importer_idx] else {
         continue;
       };
-      let ctx = WrappedEsmInitTargetContext {
-        importer: module,
-        importer_meta: meta,
-        modules: &self.link_output.module_table.modules,
-        metas: &self.link_output.metas,
-        stmt_infos: &self.link_output.stmt_infos,
-        symbol_db: &self.link_output.symbol_db,
-        order_wrap_state: &probe_state,
-        strict_execution_order: true,
-      };
-      for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[importer_idx].iter_enumerated()
-      {
-        let stmt_is_included = meta.stmt_info_included.has_bit(stmt_info_idx);
-        for &rec_idx in &stmt_info.import_records {
-          let rec = &module.import_records[rec_idx];
-          if rec.kind != ImportKind::Import {
-            continue;
-          }
-          // An included statement's targets are emitted at its own position; an *excluded*
-          // statement still forwards when it is a re-export hop the wrapped importer owns (the
-          // `transitive_esm_init_targets` path: a tree-shaken `export … from` emits nothing, so the
-          // importer's `init_*` calls the hop targets' `init_*` in its place). Non-re-export
-          // excluded records forward nothing and are skipped.
-          if !stmt_is_included
-            && !rec
-              .meta
-              .intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
-          {
-            continue;
-          }
-          // Resolve targets exactly as the finalizer will, but treat every wrapper as reachable —
-          // we are discovering which chunk edges *would* be created, not filtering to a chunk.
-          let targets = collect_wrapped_esm_init_targets_for_import_record(
-            &ctx,
-            rec_idx,
-            |_| true,
-            |forwarding_module_idx| {
-              chunk_graph.module_to_chunk[forwarding_module_idx] == Some(importer_chunk)
-            },
-          );
-          for target_idx in targets {
-            if let Some(target_chunk) = chunk_graph.module_to_chunk[target_idx]
-              && target_chunk != importer_chunk
-              && chunk_graph.module_is_in_live_chunk(target_idx)
-            {
-              edges[importer_chunk].insert(target_chunk);
-            }
-          }
+
+      let mut targets = Vec::new();
+
+      // Retained re-export overlays apply to *every* importer, eager or wrapped.
+      self.project_reexport_overlay_edges(&probe_state, module, &mut targets);
+
+      // Init forwarding through included imports and excluded re-export hops only applies to
+      // importers that carry their own ESM `init_*` (an order-wrapped plan member or an interop
+      // `WrapKind::Esm` module).
+      if probe_state.esm_init_target(importer_idx, meta).is_some() {
+        self.project_collector_edges(
+          chunk_graph,
+          &probe_state,
+          module,
+          meta,
+          importer_chunk,
+          &mut targets,
+        );
+        self.project_excluded_forwarder_edges(
+          chunk_graph,
+          &probe_state,
+          module,
+          importer_chunk,
+          &mut targets,
+        );
+      }
+
+      for target_idx in targets {
+        if let Some(target_chunk) = chunk_graph.module_to_chunk[target_idx]
+          && target_chunk != importer_chunk
+          && chunk_graph.module_is_in_live_chunk(target_idx)
+        {
+          edges[importer_chunk].insert(target_chunk);
         }
       }
     }
@@ -295,13 +317,168 @@ impl GenerateStage<'_> {
     edges
   }
 
+  /// Retained re-export overlay projection — mirrors `add_order_import_overlay_depended_symbols`,
+  /// which registers an importer's `OrderImportOverlay` referenced symbols (the direct target's
+  /// `init_*` wrapper, plus namespaces) from the importer's chunk with no gate on whether the
+  /// importer owns an `init_*`. The probe carries the same overlays `lower_order_state` mints
+  /// (populated in `probe_order_state`), so this surfaces an *eager* forwarder's cross-chunk hop
+  /// exactly as the linker will register it — the edge source the wrapped-only projection missed
+  /// (Hole 1).
+  ///
+  /// A wrapper-referencing overlay (non-empty `referenced_symbols`) always names its own record's
+  /// direct target, so the projected chunk edge is `importer -> record.resolved_module`. Reading
+  /// the record's resolved module rather than the referenced symbol's owner is deliberate: the
+  /// probe stands each not-yet-minted wrapper in as the module's namespace ref, and resolving that
+  /// placeholder through the export chain can canonicalize to a *different* owner (e.g. a renamed
+  /// star re-export), which would fabricate a phantom edge. A `transitive_reexport` overlay carries
+  /// no referenced symbols — its hop is registered through the metadata path, not a direct edge —
+  /// so it is skipped here and covered by the collector / non-included-forwarder projections.
+  fn project_reexport_overlay_edges(
+    &self,
+    probe_state: &super::order_wrap_state::OrderWrapState,
+    module: &NormalModule,
+    targets: &mut Vec<ModuleIdx>,
+  ) {
+    for (key, overlay) in probe_state.import_overlays_for_importer(module.idx) {
+      // A `transitive_reexport` overlay (no referenced symbols) routes its init through the
+      // metadata path, not a direct edge, so it is covered by the collector / non-included-forwarder
+      // projections instead. A nested re-export record is one a wrapped ancestor barrel walks
+      // *through* to own the init itself, so the record's own module emits nothing for it — for an
+      // eager forwarder that hop's `init_*` import is DCE'd, and projecting it would fabricate a
+      // cycle and over-wrap a tree-shaking-equivalent graph (the `retained_star_renamed_cycle`
+      // shape, where a dead renamed re-export is nested under a consuming star re-export).
+      if overlay.referenced_symbols.is_empty()
+        || probe_state.is_nested_reexport_record(module.idx, key.record)
+      {
+        continue;
+      }
+      let Some(target_idx) = module.import_records[key.record].resolved_module else {
+        continue;
+      };
+      // Only an order-wrapped direct target is a *new* forwarding edge this plan adds. An interop
+      // `WrapKind::Esm` target already carries its wrapper in flag-off output, so its overlay edge
+      // is in the baseline rather than an emergent one.
+      if probe_state
+        .esm_init_target(target_idx, &self.link_output.metas[target_idx])
+        .is_some_and(|target| matches!(target.origin, EsmInitOrigin::ExecutionOrder))
+      {
+        targets.push(target_idx);
+      }
+    }
+  }
+
+  /// Included-import and retained excluded-re-export projection — mirrors both
+  /// `add_included_import_esm_init_depended_symbols` and the resolved-exports registration of a
+  /// wrapped importer's retained re-export hops: for each included statement, and each excluded
+  /// re-export hop, resolve targets with the finalizer's own
+  /// `collect_wrapped_esm_init_targets_for_import_record`, treating every wrapper as reachable since
+  /// we are discovering which chunk edges *would* be created. This is the drift-free core the
+  /// original projection already performed; the two holes are closed by the overlay and
+  /// non-included-forwarder projections beside it.
+  fn project_collector_edges(
+    &self,
+    chunk_graph: &ChunkGraph,
+    probe_state: &super::order_wrap_state::OrderWrapState,
+    module: &NormalModule,
+    meta: &crate::types::linking_metadata::LinkingMetadata,
+    importer_chunk: ChunkIdx,
+    targets: &mut Vec<ModuleIdx>,
+  ) {
+    let ctx = WrappedEsmInitTargetContext {
+      importer: module,
+      importer_meta: meta,
+      modules: &self.link_output.module_table.modules,
+      metas: &self.link_output.metas,
+      stmt_infos: &self.link_output.stmt_infos,
+      symbol_db: &self.link_output.symbol_db,
+      order_wrap_state: probe_state,
+      strict_execution_order: true,
+    };
+    for (stmt_info_idx, stmt_info) in self.link_output.stmt_infos[module.idx].iter_enumerated() {
+      let stmt_is_included = meta.stmt_info_included.has_bit(stmt_info_idx);
+      for &rec_idx in &stmt_info.import_records {
+        let rec = &module.import_records[rec_idx];
+        if rec.kind != ImportKind::Import {
+          continue;
+        }
+        // An included statement's targets are emitted at its own position; an *excluded* statement
+        // still forwards when it is a re-export hop the wrapped importer owns. Non-re-export
+        // excluded records forward nothing and are skipped.
+        if !stmt_is_included
+          && !rec.meta.intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
+        {
+          continue;
+        }
+        targets.extend(collect_wrapped_esm_init_targets_for_import_record(
+          &ctx,
+          rec_idx,
+          |_| true,
+          |forwarding_module_idx| {
+            chunk_graph.module_to_chunk[forwarding_module_idx] == Some(importer_chunk)
+          },
+        ));
+      }
+    }
+  }
+
+  /// Excluded non-included-forwarder projection — a wrapped importer's re-export of a *non-included*
+  /// forwarder forwards init to every wrapped module the forwarder's static imports reach, walking
+  /// the forwarder itself rather than only its resolved exports. This mirrors the excluded-statement
+  /// metadata routing (`transitive_esm_init_targets` → `collect_order_wrap_esm_init_targets`) that
+  /// `add_transitive_esm_init_depended_symbols` registers. Restricting the walk to *non-included*
+  /// forwarders is what keeps it faithful: such a forwarder never carries a retained re-export path,
+  /// so the unrestricted walk is exactly the real routing (an included re-export can carry a
+  /// retained-path restriction and is already resolved drift-free by the collector above). This is
+  /// the edge source the resolved-exports-only projection missed (Hole 2).
+  fn project_excluded_forwarder_edges(
+    &self,
+    chunk_graph: &ChunkGraph,
+    probe_state: &super::order_wrap_state::OrderWrapState,
+    module: &NormalModule,
+    importer_chunk: ChunkIdx,
+    targets: &mut Vec<ModuleIdx>,
+  ) {
+    let mut visited = FxHashSet::default();
+    for rec in &module.import_records {
+      if rec.kind != ImportKind::Import
+        || !rec.meta.intersects(ImportRecordMeta::IsExportStar | ImportRecordMeta::IsReExportOnly)
+      {
+        continue;
+      }
+      let Some(forwarder_idx) = rec.resolved_module else {
+        continue;
+      };
+      if self.link_output.metas[forwarder_idx].is_included {
+        continue;
+      }
+      collect_order_wrap_esm_init_targets(
+        &self.link_output.module_table.modules,
+        &self.link_output.metas,
+        chunk_graph,
+        probe_state,
+        importer_chunk,
+        forwarder_idx,
+        None,
+        &mut visited,
+        targets,
+      );
+    }
+  }
+
   /// A discovery-only [`OrderWrapState`] that marks exactly the plan's modules order-wrapped, so
   /// `esm_init_target` answers "is this module wrapped by this plan?" during edge projection.
   /// Reuses each module's existing namespace symbol as the wrapper placeholder — the projector only
   /// reads target *identity*, never the wrapper symbol's value — so no facade symbols are minted and
-  /// no symbol chunk ownership is touched. Built fresh per fixpoint round, so it always reflects the
-  /// current plan with no stale routes.
-  fn probe_order_state(&self, plan: &OrderWrapPlan) -> super::order_wrap_state::OrderWrapState {
+  /// no symbol chunk ownership is touched. Each wrapper is assigned its module's own chunk (exactly
+  /// as `place_order_wrap_modules` does after real lowering) so `esm_init_included_in_live_chunk`
+  /// answers truthfully — the transitive excluded-hop projection depends on it. Built fresh per
+  /// fixpoint round, so it always reflects the current plan with no stale routes.
+  fn probe_order_state(
+    &self,
+    chunk_graph: &ChunkGraph,
+    plan: &OrderWrapPlan,
+    used_symbol_refs: &UsedSymbolRefsBuilder,
+  ) -> super::order_wrap_state::OrderWrapState {
     let runtime_helper = self.esm_runtime_helper();
     let mut probe_state = super::order_wrap_state::OrderWrapState::default();
     for module_idx in plan.modules() {
@@ -315,7 +492,36 @@ impl GenerateStage<'_> {
         .expect("order wrap only applies to normal modules")
         .namespace_object_ref;
       probe_state.insert_order_wrapper(module_idx, placeholder_wrapper_ref, runtime_helper);
+      if let Some(chunk_idx) = chunk_graph.module_to_chunk[module_idx] {
+        probe_state.assign_order_wrapper_chunk(module_idx, chunk_idx);
+      }
     }
+
+    // Populate exactly the nested re-export records and per-record overlays `lower_order_state`
+    // mints for this plan, so the transitive excluded-hop projection restricts each barrel's walk
+    // to its retained re-export path just like the real metadata pass (no over-approximation on
+    // retained star re-exports) and the overlay projection sees every eager forwarder's hop. The
+    // module's own namespace ref stands in for each not-yet-minted wrapper — projection reads only
+    // target identity, never the wrapper symbol's value.
+    let input = super::order_wrapping::OrderLoweringInput {
+      plan,
+      modules: &self.link_output.module_table.modules,
+      linking: &self.link_output.metas,
+      statements: &self.link_output.stmt_infos,
+      export_chains: &self.link_output.normal_symbol_exports_chain_map,
+      star_reexport_records_by_imported_symbol: &self
+        .link_output
+        .star_reexport_records_by_imported_symbol,
+      used_symbols: used_symbol_refs,
+    };
+    let reexport_usage = super::order_wrapping::collect_frozen_reexport_usage(&input);
+    probe_state.set_nested_reexport_records(reexport_usage.nested_records().clone());
+    super::order_wrapping::populate_order_import_overlays(
+      &input,
+      &reexport_usage,
+      &mut probe_state,
+      self.options.code_splitting.is_disabled(),
+    );
     probe_state
   }
 

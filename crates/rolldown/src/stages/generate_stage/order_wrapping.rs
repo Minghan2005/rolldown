@@ -16,15 +16,15 @@ use super::{
   order_wrap_state::{OrderImportKey, OrderImportOverlay, OrderWrapState},
 };
 
-struct OrderLoweringInput<'a> {
-  plan: &'a OrderWrapPlan,
-  modules: &'a IndexModules,
-  linking: &'a LinkingMetadataVec,
-  statements: &'a IndexStmtInfos,
-  export_chains: &'a FxHashMap<SymbolRef, Vec<SymbolRef>>,
-  star_reexport_records_by_imported_symbol:
+pub(super) struct OrderLoweringInput<'a> {
+  pub(super) plan: &'a OrderWrapPlan,
+  pub(super) modules: &'a IndexModules,
+  pub(super) linking: &'a LinkingMetadataVec,
+  pub(super) statements: &'a IndexStmtInfos,
+  pub(super) export_chains: &'a FxHashMap<SymbolRef, Vec<SymbolRef>>,
+  pub(super) star_reexport_records_by_imported_symbol:
     &'a FxHashMap<SymbolRef, Vec<Vec<(ModuleIdx, ImportRecordIdx)>>>,
-  used_symbols: &'a UsedSymbolRefsBuilder,
+  pub(super) used_symbols: &'a UsedSymbolRefsBuilder,
 }
 
 struct OrderLoweringOutput<'a> {
@@ -32,10 +32,16 @@ struct OrderLoweringOutput<'a> {
   state: &'a mut OrderWrapState,
 }
 
-struct FrozenReexportUsage {
+pub(super) struct FrozenReexportUsage {
   root_paths: FxHashMap<(ModuleIdx, ImportRecordIdx), Vec<(ModuleIdx, ImportRecordIdx)>>,
   nested_records: FxHashSet<(ModuleIdx, ImportRecordIdx)>,
   consumed_facades: FxHashSet<SymbolRef>,
+}
+
+impl FrozenReexportUsage {
+  pub(super) fn nested_records(&self) -> &FxHashSet<(ModuleIdx, ImportRecordIdx)> {
+    &self.nested_records
+  }
 }
 
 impl GenerateStage<'_> {
@@ -502,6 +508,24 @@ fn lower_order_state(
     output.state.insert_order_wrapper(module_idx, wrapper_ref, runtime_helper);
   }
 
+  populate_order_import_overlays(input, &reexport_usage, output.state, code_splitting_disabled);
+}
+
+/// Mint the per-record [`OrderImportOverlay`]s for the current plan: a wrapper-referencing overlay
+/// for a re-export/execution-dependency import of a planned direct target, and a
+/// retained-re-export-path overlay for a re-export that itself reaches the plan through a
+/// tree-shaken barrel. Split out of [`lower_order_state`] so the emergent-cycle fixpoint projector
+/// can populate an identical set of overlays on its probe state — the overlays and the nested
+/// re-export records are what let the shared `transitive_esm_init_targets` restrict a barrel's hop
+/// walk to its retained path, so projection stays byte-faithful to the real registration instead of
+/// over-approximating. Reads and writes only the [`OrderWrapState`]; it never mints symbols, so the
+/// projector can drive it with each module's namespace ref as a wrapper placeholder.
+pub(super) fn populate_order_import_overlays(
+  input: &OrderLoweringInput<'_>,
+  reexport_usage: &FrozenReexportUsage,
+  state: &mut OrderWrapState,
+  code_splitting_disabled: bool,
+) {
   for (importer_idx, module) in input.modules.iter_enumerated() {
     let Some(importer) = module.as_normal() else {
       continue;
@@ -514,13 +538,8 @@ fn lower_order_state(
           continue;
         };
         let direct_target_is_planned = input.plan.contains(&importee_idx);
-        let retained_reexport_path = retained_order_reexport_path(
-          input,
-          &reexport_usage,
-          importer_idx,
-          stmt_info_idx,
-          rec_idx,
-        );
+        let retained_reexport_path =
+          retained_order_reexport_path(input, reexport_usage, importer_idx, stmt_info_idx, rec_idx);
         if !execution_dependencies.contains(&importee_idx) && retained_reexport_path.is_none() {
           continue;
         }
@@ -531,7 +550,7 @@ fn lower_order_state(
           if let Some(retained_reexport_path) = retained_reexport_path
             && static_import_reaches_plan(input, importee_idx)
           {
-            output.state.insert_import_overlay(
+            state.insert_import_overlay(
               OrderImportKey { importer: importer_idx, statement: stmt_info_idx, record: rec_idx },
               OrderImportOverlay::transitive_reexport(retained_reexport_path),
               importer.namespace_object_ref,
@@ -540,8 +559,7 @@ fn lower_order_state(
           }
           continue;
         }
-        let Some(init_target) =
-          output.state.esm_init_target(importee_idx, &input.linking[importee_idx])
+        let Some(init_target) = state.esm_init_target(importee_idx, &input.linking[importee_idx])
         else {
           continue;
         };
@@ -561,7 +579,7 @@ fn lower_order_state(
           overlay.retained_reexport_path = retained_reexport_path;
         }
         if let Some(overlay) = overlay {
-          output.state.insert_import_overlay(
+          state.insert_import_overlay(
             OrderImportKey { importer: importer_idx, statement: stmt_info_idx, record: rec_idx },
             overlay,
             importer.namespace_object_ref,
@@ -597,7 +615,7 @@ fn static_import_reaches_plan(input: &OrderLoweringInput<'_>, root: ModuleIdx) -
   false
 }
 
-fn collect_frozen_reexport_usage(input: &OrderLoweringInput<'_>) -> FrozenReexportUsage {
+pub(super) fn collect_frozen_reexport_usage(input: &OrderLoweringInput<'_>) -> FrozenReexportUsage {
   let mut consumed_facades = FxHashSet::default();
   for (used_ref, chain) in input.export_chains {
     if input.used_symbols.contains(used_ref) {

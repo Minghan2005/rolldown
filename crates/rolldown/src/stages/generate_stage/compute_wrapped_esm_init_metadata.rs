@@ -285,8 +285,15 @@ fn collect_legacy_esm_init_targets(
 }
 
 /// Follow excluded re-exports through barrels to included wrapped importees.
+///
+/// Shared with the emergent-cycle fixpoint projector: called with `retained_reexport_path: None`
+/// on a *non-included* forwarder, it walks the forwarder's every static import to the wrapped
+/// modules they reach — exactly the routing the real metadata pass performs for such a forwarder
+/// (a non-included forwarder never carries a retained re-export path, so the walk is unrestricted
+/// in both places). This is the excluded-hop edge source the resolved-exports-only projection
+/// missed (Hole 2).
 #[expect(clippy::too_many_arguments)]
-fn collect_order_wrap_esm_init_targets(
+pub(super) fn collect_order_wrap_esm_init_targets(
   modules: &IndexModules,
   metas: &LinkingMetadataVec,
   chunk_graph: &ChunkGraph,
