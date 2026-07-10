@@ -52,12 +52,16 @@ function init_pref_pkg() {
 function boot() {
 	return tag(getPref());
 }
+async function initApplication() {
+	return tag(await getPref());
+}
 function init_main() {
 	return (init_main = __esmMin((() => {
 		init_first();
 		init_pref_pkg();
 		(globalThis.__events ??= []).push("main");
 		globalThis.__result = boot();
+		globalThis.__ready = initApplication();
 	})))();
 }
 //#endregion
@@ -144,11 +148,15 @@ function tag(value) {
 function boot() {
 	return tag(getPref());
 }
+async function initApplication() {
+	return tag(await getPref());
+}
 function init_main() {
 	return (init_main = __esmMin((() => {
 		init_facade();
 		(globalThis.__events ??= []).push("main");
 		globalThis.__result = boot();
+		globalThis.__ready = initApplication();
 	})))();
 }
 //#endregion
