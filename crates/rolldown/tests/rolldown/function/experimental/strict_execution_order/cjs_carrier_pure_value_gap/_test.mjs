@@ -1,16 +1,9 @@
 import assert from 'node:assert';
+import { captureConsoleLog } from '../../../../_test_helpers/capture-console-log.mjs';
 
-const logs = [];
-const originalLog = console.log;
-console.log = (...args) => {
-  logs.push(args.join(' '));
-};
-
-try {
+const logs = await captureConsoleLog(async () => {
   await import('./dist/unused.js');
   await import('./dist/main.js');
-} finally {
-  console.log = originalLog;
-}
+});
 
 assert.deepStrictEqual(logs, ['UNUSED', 'E', 'MAIN:ready']);
