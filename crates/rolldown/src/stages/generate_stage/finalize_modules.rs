@@ -62,16 +62,19 @@ impl GenerateStage<'_> {
           let (
             transferred_import_record,
             rendered_concatenated_wrapped_module_parts,
+            module_warnings,
             module_errors,
           ) = ctx.finalize_normal_module(ast, ast_scope);
 
-          (!module_errors.is_empty()
+          (!module_warnings.is_empty()
+            || !module_errors.is_empty()
             || !transferred_import_record.is_empty()
             || !matches!(concatenated_wrapped_module_kind, ConcatenateWrappedModuleKind::None))
           .then_some((
             idx,
             transferred_import_record,
             rendered_concatenated_wrapped_module_parts,
+            module_warnings,
             module_errors,
           ))
         })
@@ -79,16 +82,22 @@ impl GenerateStage<'_> {
     });
 
     let mut errors = vec![];
+    let mut warnings = vec![];
     let transfer_parts_rendered_maps = finalized
       .into_iter()
-      .filter_map(|(idx, transferred_import_record, rendered_parts, module_errors)| {
-        if module_errors.is_empty() {
-          return Some((idx, transferred_import_record, rendered_parts));
-        }
-        errors.extend(module_errors);
-        None
-      })
+      .filter_map(
+        |(idx, transferred_import_record, rendered_parts, module_warnings, module_errors)| {
+          warnings.extend(module_warnings);
+          if module_errors.is_empty() {
+            return Some((idx, transferred_import_record, rendered_parts));
+          }
+          errors.extend(module_errors);
+          None
+        },
+      )
       .collect::<Vec<_>>();
+
+    self.link_output.warnings.append(&mut warnings);
 
     if !errors.is_empty() {
       Err(errors)?;

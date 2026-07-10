@@ -113,6 +113,19 @@ pub struct ScopeHoistingFinalizer<'me, 'ast: 'me> {
   /// `RefCell` because the rewrite is reached through `&self` visitor paths that are already
   /// borrowing the node being replaced.
   pub missing_file_reference_ids: RefCell<FxIndexMap<CompactStr, Span>>,
+  /// Spans of the `import.meta` accesses this finalizer could not rewrite away, and so replaced
+  /// with an empty object. Recorded here rather than decided upfront, so the `EMPTY_IMPORT_META`
+  /// warning can never claim an `import.meta` survives when a rewrite in fact handled it.
+  ///
+  /// The `bool` is whether the surviving `import.meta` is the object of an `import.meta.url`,
+  /// which the diagnostic points at a polyfilling guide for.
+  ///
+  /// Keyed by span, because an `import.meta.<prop>` that fails to rewrite is reached twice: once
+  /// as the member expression (which knows the property) and once as the bare `import.meta`
+  /// object it walks into. The first insert wins, so the property-aware one is kept.
+  ///
+  /// `RefCell` for the same reason as `missing_file_reference_ids`.
+  pub surviving_import_meta_spans: RefCell<FxIndexMap<Span, bool>>,
 }
 
 impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
@@ -1063,6 +1076,11 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
           } else {
             // If we don't support polyfill `import.meta.url` in this platform and format, we just keep it as it is
             // so users may handle it in their own way.
+            if !self.ctx.options.format.keep_esm_import_export_syntax() {
+              // Claim the span before walking reaches the bare `import.meta`, so the warning knows
+              // this is an `import.meta.url`
+              self.record_surviving_import_meta(member_expr.object.span(), true);
+            }
             None
           };
           return new_expr;
@@ -1079,6 +1097,13 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
       return self.rewrite_rollup_file_url(property_name, original_expr_span);
     }
     None
+  }
+
+  /// Remember an `import.meta` that no rewrite could get rid of, so it is left to be replaced with
+  /// an empty object. Callers are responsible for only reaching this on a non-esm output, which
+  /// keeps `import.meta` as-is rather than replacing it.
+  pub fn record_surviving_import_meta(&self, span: Span, is_import_meta_url: bool) {
+    self.surviving_import_meta_spans.borrow_mut().entry(span).or_insert(is_import_meta_url);
   }
 
   fn rewrite_rollup_file_url(
@@ -1121,7 +1146,10 @@ impl<'me, 'ast> ScopeHoistingFinalizer<'me, 'ast> {
               ast::Argument::StaticMemberExpression(ast::StaticMemberExpression::boxed(
                 SPAN,
                 ast::Expression::new_meta_property(
-                  SPAN,
+                  // Carry the source span, so that if this generated `import.meta.url` cannot be
+                  // polyfilled either, the diagnostic points at the `import.meta.ROLLUP_FILE_URL_*`
+                  // the user actually wrote.
+                  original_expr_span,
                   ast::IdentifierName::new(SPAN, "import", &self.ast_factory),
                   ast::IdentifierName::new(SPAN, "meta", &self.ast_factory),
                   &self.ast_factory,

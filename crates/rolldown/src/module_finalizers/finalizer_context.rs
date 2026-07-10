@@ -8,6 +8,7 @@ use rolldown_common::{
 pub type FinalizerMutableFields = (
   FxIndexMap<ImportRecordIdx, String>, // transferred_import_record
   RenderedConcatenatedModuleParts,     // rendered_concatenated_wrapped_module_parts
+  Vec<BuildDiagnostic>,                // warnings
   Vec<BuildDiagnostic>,                // errors
 );
 
@@ -127,8 +128,28 @@ impl<'me> ScopeHoistingFinalizerContext<'me> {
         rendered_concatenated_wrapped_module_parts: RenderedConcatenatedModuleParts::default(),
         json_module_inlined_prop: need_inline_json_prop.then(|| Box::new(FxHashMap::default())),
         missing_file_reference_ids: RefCell::default(),
+        surviving_import_meta_spans: RefCell::default(),
       };
       finalizer.visit_program(oxc_program);
+
+      let warnings = {
+        let module = finalizer.ctx.module;
+        finalizer
+          .surviving_import_meta_spans
+          .borrow()
+          .iter()
+          .map(|(span, is_import_meta_url)| {
+            BuildDiagnostic::empty_import_meta(
+              module.id.to_string(),
+              module.ecma_view.source.clone(),
+              *span,
+              finalizer.ctx.options.format.as_str().into(),
+              *is_import_meta_url,
+            )
+            .with_severity_warning()
+          })
+          .collect::<Vec<_>>()
+      };
 
       let missing_file_reference_ids = finalizer.missing_file_reference_ids.into_inner();
       let errors = if missing_file_reference_ids.is_empty() {
@@ -151,6 +172,7 @@ impl<'me> ScopeHoistingFinalizerContext<'me> {
       (
         finalizer.transferred_import_record,
         finalizer.rendered_concatenated_wrapped_module_parts,
+        warnings,
         errors,
       )
     })

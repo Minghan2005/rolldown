@@ -487,6 +487,7 @@ impl<'ast> VisitMut<'ast> for ScopeHoistingFinalizer<'_, 'ast> {
           && meta.meta.name == "import"
           && meta.property.name == "meta"
         {
+          self.record_surviving_import_meta(meta.span, false);
           *expr = ast::Expression::new_object_expression(
             SPAN,
             oxc::allocator::Vec::new_in(&self.ast_factory),

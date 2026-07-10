@@ -275,45 +275,6 @@ impl<'me, 'ast: 'me> Visit<'ast> for AstScanner<'me, 'ast> {
     walk::walk_new_expression(self, it);
   }
 
-  fn visit_meta_property(&mut self, it: &ast::MetaProperty<'ast>) {
-    if self.immutable_ctx.flat_options.keep_esm_import_export_syntax() {
-      walk::walk_meta_property(self, it);
-      return;
-    }
-    if let Some(parent) = self.visit_path.last() {
-      let should_warn = parent
-        .as_member_expression_kind()
-        .map(|member_expr| {
-          let static_name = member_expr.static_property_name().unwrap_or(ast::Str::from(""));
-          // `import.meta.ROLLUP_FILE_URL_*` is rewritten to `new URL(..., import.meta.url).href`,
-          // so it degrades exactly like `import.meta.url` does.
-          let is_special_property = static_name == "url"
-            || static_name == "dirname"
-            || static_name == "filename"
-            || static_name.as_str().starts_with("ROLLUP_FILE_URL_");
-          let format = &self.immutable_ctx.options.format;
-          !is_special_property || matches!(format, OutputFormat::Iife | OutputFormat::Umd)
-        })
-        // Here we need to set it to `true` to emit warnings when leaving `import.meta` alone along with the logic head of this.
-        .unwrap_or(true);
-
-      if should_warn && it.meta.name == "import" && it.property.name == "meta" {
-        self.result.warnings.push(
-          BuildDiagnostic::empty_import_meta(
-            self.immutable_ctx.id.to_string(),
-            self.immutable_ctx.source.clone(),
-            it.span(),
-            self.immutable_ctx.options.format.as_str().into(),
-            parent.as_member_expression_kind().is_some_and(|member_expr| {
-              member_expr.static_property_name().is_some_and(|static_name| static_name == "url")
-            }),
-          )
-          .with_severity_warning(),
-        );
-      }
-    }
-  }
-
   fn visit_this_expression(&mut self, it: &ast::ThisExpression) {
     if !self.is_this_nested() {
       self.top_level_this_expr_set.insert(it.node_id());
