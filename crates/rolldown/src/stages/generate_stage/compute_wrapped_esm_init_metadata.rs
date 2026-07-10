@@ -288,10 +288,12 @@ fn collect_legacy_esm_init_targets(
 ///
 /// Shared with the emergent-cycle fixpoint projector: called with `retained_reexport_path: None`
 /// on a *non-included* forwarder, it walks the forwarder's every static import to the wrapped
-/// modules they reach — exactly the routing the real metadata pass performs for such a forwarder
-/// (a non-included forwarder never carries a retained re-export path, so the walk is unrestricted
-/// in both places). This is the excluded-hop edge source the resolved-exports-only projection
-/// missed (Hole 2).
+/// modules they reach — the excluded-hop routing the real metadata pass performs, and the edge
+/// source the resolved-exports-only projection missed (Hole 2). The real pass can pass `Some(path)`
+/// even through a non-included forwarder (retained star paths are recorded pre-tree-shaking); the
+/// projector's `None` differs from that only at the same-chunk prune below, and every retained-path
+/// target is a resolved export of the importer that the projector already covers through its
+/// collector source — see `project_excluded_forwarder_edges`.
 #[expect(clippy::too_many_arguments)]
 pub(super) fn collect_order_wrap_esm_init_targets(
   modules: &IndexModules,

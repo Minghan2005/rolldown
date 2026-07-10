@@ -4,8 +4,9 @@ use itertools::Itertools;
 use oxc_index::{IndexVec, index_vec};
 use petgraph::prelude::DiGraphMap;
 use rolldown_common::{
-  ChunkIdx, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx, ImportRecordMeta, Module,
-  ModuleIdx, NormalModule, SymbolOrMemberExprRef, SymbolRef, UsedSymbolRefsBuilder, WrapKind,
+  ChunkIdx, ConcatenateWrappedModuleKind, EcmaViewMeta, ExportsKind, ImportKind, ImportRecordIdx,
+  ImportRecordMeta, Module, ModuleIdx, NormalModule, SymbolOrMemberExprRef, SymbolRef,
+  UsedSymbolRefsBuilder, WrapKind,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -342,14 +343,41 @@ impl GenerateStage<'_> {
     for (key, overlay) in probe_state.import_overlays_for_importer(module.idx) {
       // A `transitive_reexport` overlay (no referenced symbols) routes its init through the
       // metadata path, not a direct edge, so it is covered by the collector / non-included-forwarder
-      // projections instead. A nested re-export record is one a wrapped ancestor barrel walks
-      // *through* to own the init itself, so the record's own module emits nothing for it — for an
-      // eager forwarder that hop's `init_*` import is DCE'd, and projecting it would fabricate a
-      // cycle and over-wrap a tree-shaking-equivalent graph (the `retained_star_renamed_cycle`
-      // shape, where a dead renamed re-export is nested under a consuming star re-export).
-      if overlay.referenced_symbols.is_empty()
-        || probe_state.is_nested_reexport_record(module.idx, key.record)
-      {
+      // projections instead.
+      if overlay.referenced_symbols.is_empty() {
+        continue;
+      }
+      // A nested re-export record is one a wrapped ancestor barrel walks *through* to own the init
+      // itself, so the record's own module emits nothing for it — for an eager forwarder that hop's
+      // `init_*` import is DCE'd, and projecting it would fabricate a cycle and over-wrap a
+      // tree-shaking-equivalent graph (the `retained_star_renamed_cycle` shape, where a dead renamed
+      // re-export is nested under a consuming star re-export).
+      if probe_state.is_nested_reexport_record(module.idx, key.record) {
+        // Skipping cannot drop a real edge; the two ways a *nested* record can carry a
+        // wrapper-referencing overlay are both covered elsewhere:
+        // - The record also heads a retained star path (`root_paths` takes precedence over
+        //   `nested_records` in `retained_order_reexport_path`, and paths are recorded
+        //   pre-tree-shaking), so the overlay carries a non-empty `retained_reexport_path`. The
+        //   finalizer skips record-position emission for such overlays and the owning wrapped
+        //   ancestor's retained-path traversal performs the init instead — projected from the
+        //   ancestor by the collector source. (`retained_star_renamed_cycle` exercises this.)
+        // - With an *empty* retained path, minting the overlay requires an execution dependency on
+        //   a planned target, which `build_order_wrap_plan`'s closure
+        //   (`statically_imports_wrapped_member`) turns into wrapping this importer itself before
+        //   any probe is built — and a wrapped (or interop `WrapKind::Esm`) importer's records are
+        //   never nested (`module_owns_reexport_init`), so for a live importer this combination is
+        //   unreachable. Assert it so the unproven corner (a concatenated-inner importer — a
+        //   dormant feature on this branch) trips loudly instead of silently dropping an edge.
+        debug_assert!(
+          !overlay.retained_reexport_path.is_empty()
+            || !self.link_output.metas[module.idx].is_included
+            || !matches!(
+              self.link_output.metas[module.idx].concatenated_wrapped_module_kind,
+              ConcatenateWrappedModuleKind::None
+            ),
+          "an included importer's nested re-export record carries a wrapper-referencing order \
+           overlay with no retained path; the plan closure should have wrapped the importer first",
+        );
         continue;
       }
       let Some(target_idx) = module.import_records[key.record].resolved_module else {
@@ -425,11 +453,19 @@ impl GenerateStage<'_> {
   /// forwarder forwards init to every wrapped module the forwarder's static imports reach, walking
   /// the forwarder itself rather than only its resolved exports. This mirrors the excluded-statement
   /// metadata routing (`transitive_esm_init_targets` → `collect_order_wrap_esm_init_targets`) that
-  /// `add_transitive_esm_init_depended_symbols` registers. Restricting the walk to *non-included*
-  /// forwarders is what keeps it faithful: such a forwarder never carries a retained re-export path,
-  /// so the unrestricted walk is exactly the real routing (an included re-export can carry a
-  /// retained-path restriction and is already resolved drift-free by the collector above). This is
-  /// the edge source the resolved-exports-only projection missed (Hole 2).
+  /// `add_transitive_esm_init_depended_symbols` registers. This is the edge source the
+  /// resolved-exports-only projection missed (Hole 2).
+  ///
+  /// The walk passes `retained_reexport_path: None` while the real metadata pass can carry `Some`
+  /// even through a non-included forwarder — retained star paths are recorded pre-tree-shaking
+  /// (`record_star_reexport_path`), so a path can structurally route through a forwarder that later
+  /// loses inclusion. The two calls then differ only at the same-chunk prune inside
+  /// `collect_order_wrap_esm_init_targets`: `None` prunes a same-chunk included waypoint where
+  /// `Some(path)` walks through it. That divergence never loses a real cross-chunk edge: every
+  /// target reachable across a retained re-export path is a resolved export of the importer and is
+  /// already projected by [`Self::project_collector_edges`]; this walk only needs to add the
+  /// forwarder's *plain-import* targets (which lie on no retained path), so `None` is faithful for
+  /// exactly the edges this source owns.
   fn project_excluded_forwarder_edges(
     &self,
     chunk_graph: &ChunkGraph,
