@@ -280,10 +280,12 @@ impl DevEngine {
   /// build id.) Reconnects arrive as fresh clientIds, which is the per-client reset.
   pub async fn register_client(&self, client_id: String) {
     let top_level_evaluated = Arc::clone(&*self.dev_context.top_level_evaluated.lock().await);
-    self.clients.lock().await.entry(client_id).or_insert_with(|| ClientSession {
-      top_level_evaluated,
-      ..ClientSession::default()
-    });
+    self
+      .clients
+      .lock()
+      .await
+      .entry(client_id)
+      .or_insert_with(|| ClientSession { top_level_evaluated, ..ClientSession::default() });
   }
 
   /// Client-disconnect signal: drops the session together with any
